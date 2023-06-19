@@ -70,7 +70,7 @@ spec:
     spec:
       containers:
       - name: http-svc
-        image: k8s.gcr.io/e2e-test-images/echoserver:2.3
+        image: registry.k8s.io/e2e-test-images/echoserver:2.3
         ports:
         - containerPort: 8080
         env:
@@ -98,6 +98,7 @@ metadata:
   name: foo-tls
   namespace: default
 spec:
+  ingressClassName: nginx
   tls:
   - hosts:
     - foo.bar.com
@@ -115,14 +116,20 @@ spec:
   - host: foo.bar.com
     http:
       paths:
-      - backend:
-          serviceName: http-svc
-          servicePort: 80
-        path: /
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: http-svc
+            port:
+              number: 80
   - host: bar.baz.com
     http:
       paths:
-      - backend:
-          serviceName: nginx
-          servicePort: 80
-        path: /
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: nginx
+            port:
+              number: 80

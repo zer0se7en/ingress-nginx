@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 	networking "k8s.io/api/networking/v1"
 
@@ -101,7 +101,7 @@ var _ = framework.DescribeAnnotation("custom-http-errors", func() {
 
 		ginkgo.By("using the custom default-backend from annotation for upstream")
 		customDefaultBackend := "from-annotation"
-		f.NewEchoDeploymentWithNameAndReplicas(customDefaultBackend, 1)
+		f.NewEchoDeployment(framework.WithDeploymentName(customDefaultBackend))
 
 		err = framework.UpdateIngress(f.KubeClientSet, f.Namespace, host, func(ingress *networking.Ingress) error {
 			ingress.ObjectMeta.Annotations["nginx.ingress.kubernetes.io/default-backend"] = customDefaultBackend

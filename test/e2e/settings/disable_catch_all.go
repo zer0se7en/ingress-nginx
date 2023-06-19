@@ -21,7 +21,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 	appsv1 "k8s.io/api/apps/v1"
 	networking "k8s.io/api/networking/v1"
@@ -34,7 +34,7 @@ var _ = framework.IngressNginxDescribe("[Flag] disable-catch-all", func() {
 	f := framework.NewDefaultFramework("disabled-catch-all")
 
 	ginkgo.BeforeEach(func() {
-		f.NewEchoDeploymentWithReplicas(1)
+		f.NewEchoDeployment(framework.WithDeploymentReplicas(1))
 
 		err := f.UpdateIngressControllerDeployment(func(deployment *appsv1.Deployment) error {
 			args := deployment.Spec.Template.Spec.Containers[0].Args

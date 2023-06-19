@@ -7,26 +7,34 @@ aliases:
   - thockin
 
   ingress-nginx-admins:
-  - bowei
   - rikatz
+  - strongjz
 
   ingress-nginx-maintainers:
-  - ElvinEfendi
-  - justinsb
   - rikatz
   - strongjz
+  - cpanato
+  - puerco
+  - tao12345666333
 
   ingress-nginx-reviewers:
-  - ElvinEfendi
-  - cmluciano
   - rikatz
   - strongjz
+  - puerco
+  - cpanato
   - tao12345666333
 
   ingress-nginx-helm-maintainers:
-  - ChiefAlexander
   - cpanato
+  - strongjz
 
   ingress-nginx-helm-reviewers:
-  - ChiefAlexander
   - cpanato
+  - strongjz
+
+  ingress-nginx-docs-maintainers:
+  - longwuyuan
+  - tao12345666333
+
+  ingress-nginx-kube-webhook-certgen-reviewers:
+  - invidian

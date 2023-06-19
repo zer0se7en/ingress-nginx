@@ -24,25 +24,22 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"k8s.io/ingress-nginx/test/e2e/framework"
+
+	networking "k8s.io/api/networking/v1"
 )
 
-var _ = framework.IngressNginxDescribe("[Serial] admission controller", func() {
+var _ = framework.IngressNginxDescribeSerial("[Admission] admission controller", func() {
 	f := framework.NewDefaultFramework("admission")
 
 	ginkgo.BeforeEach(func() {
 		f.NewEchoDeployment()
 		f.NewSlowEchoDeployment()
-	})
-
-	ginkgo.AfterEach(func() {
-		err := uninstallChart(f)
-		assert.Nil(ginkgo.GinkgoT(), err, "uninstalling helm chart")
 	})
 
 	ginkgo.It("reject ingress with global-rate-limit annotations when memcached is not configured", func() {
@@ -110,6 +107,23 @@ var _ = framework.IngressNginxDescribe("[Serial] admission controller", func() {
 		assert.Nil(ginkgo.GinkgoT(), err, "creating an ingress with the same host and path should not return an error using a canary annotation")
 	})
 
+	ginkgo.It("should block ingress with invalid path", func() {
+		host := "invalid-path"
+
+		firstIngress := framework.NewSingleIngress("valid-path", "/mypage", host, f.Namespace, framework.EchoService, 80, nil)
+		_, err := f.KubeClientSet.NetworkingV1().Ingresses(f.Namespace).Create(context.TODO(), firstIngress, metav1.CreateOptions{})
+		assert.Nil(ginkgo.GinkgoT(), err, "creating ingress")
+
+		f.WaitForNginxServer(host,
+			func(server string) bool {
+				return strings.Contains(server, fmt.Sprintf("server_name %v", host))
+			})
+
+		secondIngress := framework.NewSingleIngress("second-ingress", "/etc/nginx", host, f.Namespace, framework.EchoService, 80, nil)
+		_, err = f.KubeClientSet.NetworkingV1().Ingresses(f.Namespace).Create(context.TODO(), secondIngress, metav1.CreateOptions{})
+		assert.NotNil(ginkgo.GinkgoT(), err, "creating an ingress with invalid path should return an error")
+	})
+
 	ginkgo.It("should return an error if there is an error validating the ingress definition", func() {
 		host := "admission-test"
 
@@ -121,8 +135,72 @@ var _ = framework.IngressNginxDescribe("[Serial] admission controller", func() {
 		assert.NotNil(ginkgo.GinkgoT(), err, "creating an ingress with invalid configuration should return an error")
 	})
 
+	ginkgo.It("should return an error if there is an invalid value in some annotation", func() {
+		host := "admission-test"
+
+		annotations := map[string]string{
+			"nginx.ingress.kubernetes.io/connection-proxy-header": "a;}",
+		}
+
+		f.UpdateNginxConfigMapData("annotation-value-word-blocklist", "}")
+
+		firstIngress := framework.NewSingleIngress("first-ingress", "/", host, f.Namespace, framework.EchoService, 80, annotations)
+		_, err := f.KubeClientSet.NetworkingV1().Ingresses(f.Namespace).Create(context.TODO(), firstIngress, metav1.CreateOptions{})
+		assert.NotNil(ginkgo.GinkgoT(), err, "creating an ingress with invalid annotation value should return an error")
+	})
+
+	ginkgo.It("should return an error if there is a forbidden value in some annotation", func() {
+		host := "admission-test"
+
+		annotations := map[string]string{
+			"nginx.ingress.kubernetes.io/connection-proxy-header": "set_by_lua",
+		}
+
+		f.UpdateNginxConfigMapData("annotation-value-word-blocklist", "set_by_lua")
+
+		firstIngress := framework.NewSingleIngress("first-ingress", "/", host, f.Namespace, framework.EchoService, 80, annotations)
+		_, err := f.KubeClientSet.NetworkingV1().Ingresses(f.Namespace).Create(context.TODO(), firstIngress, metav1.CreateOptions{})
+		assert.NotNil(ginkgo.GinkgoT(), err, "creating an ingress with invalid annotation value should return an error")
+	})
+
+	ginkgo.It("should return an error if there is an invalid path and wrong pathType is set", func() {
+		host := "path-validation"
+		var (
+			exactPathType  = networking.PathTypeExact
+			prefixPathType = networking.PathTypePrefix
+			implSpecific   = networking.PathTypeImplementationSpecific
+		)
+
+		f.UpdateNginxConfigMapData("strict-validate-path-type", "true")
+
+		invalidPath := framework.NewSingleIngress("first-ingress", "/foo/bar/[a-z]{3}", host, f.Namespace, framework.EchoService, 80, nil)
+		invalidPath.Spec.Rules[0].IngressRuleValue.HTTP.Paths[0].PathType = &exactPathType
+
+		_, err := f.KubeClientSet.NetworkingV1().Ingresses(f.Namespace).Create(context.TODO(), invalidPath, metav1.CreateOptions{})
+		assert.NotNil(ginkgo.GinkgoT(), err, "creating an ingress with invalid path value should return an error")
+
+		invalidPath.Spec.Rules[0].IngressRuleValue.HTTP.Paths[0].PathType = &prefixPathType
+		_, err = f.KubeClientSet.NetworkingV1().Ingresses(f.Namespace).Create(context.TODO(), invalidPath, metav1.CreateOptions{})
+		assert.NotNil(ginkgo.GinkgoT(), err, "creating an ingress with invalid path value should return an error")
+
+		annotations := map[string]string{
+			"nginx.ingress.kubernetes.io/use-regex":      "true",
+			"nginx.ingress.kubernetes.io/rewrite-target": "/new/backend",
+		}
+		pathSpecific := framework.NewSingleIngress("pathspec-ingress", "/foo/bar/[a-z]{3}", host, f.Namespace, framework.EchoService, 80, annotations)
+		pathSpecific.Spec.Rules[0].IngressRuleValue.HTTP.Paths[0].PathType = &implSpecific
+		_, err = f.KubeClientSet.NetworkingV1().Ingresses(f.Namespace).Create(context.TODO(), pathSpecific, metav1.CreateOptions{})
+		assert.Nil(ginkgo.GinkgoT(), err, "creating an ingress with arbitrary path and implSpecific value should not return an error")
+
+		validPath := framework.NewSingleIngress("second-ingress", "/bloblo", host, f.Namespace, framework.EchoService, 80, nil)
+		_, err = f.KubeClientSet.NetworkingV1().Ingresses(f.Namespace).Create(context.TODO(), validPath, metav1.CreateOptions{})
+		assert.Nil(ginkgo.GinkgoT(), err, "creating an ingress with valid path should not return an error")
+
+	})
+
 	ginkgo.It("should not return an error if the Ingress V1 definition is valid with Ingress Class", func() {
-		err := createIngress(f.Namespace, validV1Ingress)
+		out, err := createIngress(f.Namespace, validV1Ingress)
+		assert.Equal(ginkgo.GinkgoT(), "ingress.networking.k8s.io/extensions created\n", out)
 		assert.Nil(ginkgo.GinkgoT(), err, "creating an ingress using kubectl")
 
 		f.WaitForNginxConfiguration(func(cfg string) bool {
@@ -137,7 +215,8 @@ var _ = framework.IngressNginxDescribe("[Serial] admission controller", func() {
 	})
 
 	ginkgo.It("should not return an error if the Ingress V1 definition is valid with IngressClass annotation", func() {
-		err := createIngress(f.Namespace, validV1IngressAnnotation)
+		out, err := createIngress(f.Namespace, validV1IngressAnnotation)
+		assert.Equal(ginkgo.GinkgoT(), "ingress.networking.k8s.io/extensions-class created\n", out)
 		assert.Nil(ginkgo.GinkgoT(), err, "creating an ingress using kubectl")
 
 		f.WaitForNginxConfiguration(func(cfg string) bool {
@@ -152,7 +231,8 @@ var _ = framework.IngressNginxDescribe("[Serial] admission controller", func() {
 	})
 
 	ginkgo.It("should return an error if the Ingress V1 definition contains invalid annotations", func() {
-		err := createIngress(f.Namespace, invalidV1Ingress)
+		out, err := createIngress(f.Namespace, invalidV1Ingress)
+		assert.Empty(ginkgo.GinkgoT(), out)
 		assert.NotNil(ginkgo.GinkgoT(), err, "creating an ingress using kubectl")
 
 		_, err = f.KubeClientSet.NetworkingV1().Ingresses(f.Namespace).Get(context.TODO(), "extensions-invalid", metav1.GetOptions{})
@@ -160,17 +240,13 @@ var _ = framework.IngressNginxDescribe("[Serial] admission controller", func() {
 			assert.NotNil(ginkgo.GinkgoT(), err, "creating an ingress with invalid configuration should return an error")
 		}
 	})
+
+	ginkgo.It("should not return an error for an invalid Ingress when it has unknown class", func() {
+		out, err := createIngress(f.Namespace, invalidV1IngressWithOtherClass)
+		assert.Equal(ginkgo.GinkgoT(), "ingress.networking.k8s.io/extensions-invalid-other created\n", out)
+		assert.Nil(ginkgo.GinkgoT(), err, "creating an invalid ingress with unknown class using kubectl")
+	})
 })
-
-func uninstallChart(f *framework.Framework) error {
-	cmd := exec.Command("helm", "uninstall", "--namespace", f.Namespace, "nginx-ingress")
-	_, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("unexpected error uninstalling ingress-nginx release: %v", err)
-	}
-
-	return nil
-}
 
 const (
 	validV1Ingress = `
@@ -240,22 +316,47 @@ spec:
               number: 80
 ---
 `
+	invalidV1IngressWithOtherClass = `
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: extensions-invalid-other
+  annotations:
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      invalid directive
+spec:
+  ingressClassName: nginx-other
+  rules:
+  - host: extensions-invalid
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: echo
+            port:
+              number: 80
+---
+`
 )
 
-func createIngress(namespace, ingressDefinition string) error {
+func createIngress(namespace, ingressDefinition string) (string, error) {
 	var (
+		execOut bytes.Buffer
 		execErr bytes.Buffer
 	)
 
 	cmd := exec.Command("/bin/bash", "-c", fmt.Sprintf("%v --warnings-as-errors=false apply --namespace %s -f -", framework.KubectlPath, namespace))
 	cmd.Stdin = strings.NewReader(ingressDefinition)
+	cmd.Stdout = &execOut
 	cmd.Stderr = &execErr
 
 	err := cmd.Run()
 	if err != nil {
 		stderr := strings.TrimSpace(execErr.String())
-		return fmt.Errorf("Kubectl error: %v\n%v", err, stderr)
+		return "", fmt.Errorf("kubectl error: %v\n%v", err, stderr)
 	}
 
-	return nil
+	return execOut.String(), nil
 }

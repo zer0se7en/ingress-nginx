@@ -36,17 +36,15 @@ import (
 	text_template "text/template"
 	"time"
 
-	"github.com/pkg/errors"
-
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 
-	"k8s.io/ingress-nginx/internal/ingress"
-	"k8s.io/ingress-nginx/internal/ingress/annotations/influxdb"
+	"k8s.io/ingress-nginx/internal/ingress/annotations/parser"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/ratelimit"
 	"k8s.io/ingress-nginx/internal/ingress/controller/config"
 	ing_net "k8s.io/ingress-nginx/internal/net"
+	"k8s.io/ingress-nginx/pkg/apis/ingress"
 )
 
 const (
@@ -63,6 +61,9 @@ const (
 
 // Writer is the interface to render a template
 type Writer interface {
+	// Write renders the template.
+	// NOTE: Implementors must ensure that the content of the returned slice is not modified by the implementation
+	// after the return of this function.
 	Write(conf config.TemplateConfig) ([]byte, error)
 }
 
@@ -73,12 +74,12 @@ type Template struct {
 	bp *BufferPool
 }
 
-//NewTemplate returns a new Template instance or an
-//error if the specified template file contains errors
+// NewTemplate returns a new Template instance or an
+// error if the specified template file contains errors
 func NewTemplate(file string) (*Template, error) {
 	data, err := os.ReadFile(file)
 	if err != nil {
-		return nil, errors.Wrapf(err, "unexpected error reading template %v", file)
+		return nil, fmt.Errorf("unexpected error reading template %s: %w", file, err)
 	}
 
 	tmpl, err := text_template.New("nginx.tmpl").Funcs(funcMap).Parse(string(data))
@@ -202,7 +203,12 @@ func (t *Template) Write(conf config.TemplateConfig) ([]byte, error) {
 		return nil, err
 	}
 
-	return outCmdBuf.Bytes(), nil
+	// make a copy to ensure that we are no longer modifying the content of the buffer
+	out := outCmdBuf.Bytes()
+	res := make([]byte, len(out))
+	copy(res, out)
+
+	return res, nil
 }
 
 var (
@@ -221,7 +227,12 @@ var (
 		"buildAuthLocation":               buildAuthLocation,
 		"shouldApplyGlobalAuth":           shouldApplyGlobalAuth,
 		"buildAuthResponseHeaders":        buildAuthResponseHeaders,
+		"buildAuthUpstreamLuaHeaders":     buildAuthUpstreamLuaHeaders,
 		"buildAuthProxySetHeaders":        buildAuthProxySetHeaders,
+		"buildAuthUpstreamName":           buildAuthUpstreamName,
+		"shouldApplyAuthUpstream":         shouldApplyAuthUpstream,
+		"extractHostPort":                 extractHostPort,
+		"changeHostPort":                  changeHostPort,
 		"buildProxyPass":                  buildProxyPass,
 		"filterRateLimits":                filterRateLimits,
 		"buildRateLimitZones":             buildRateLimitZones,
@@ -253,8 +264,8 @@ var (
 		"buildAuthSignURL":                   buildAuthSignURL,
 		"buildAuthSignURLLocation":           buildAuthSignURLLocation,
 		"buildOpentracing":                   buildOpentracing,
+		"buildOpentelemetry":                 buildOpentelemetry,
 		"proxySetHeader":                     proxySetHeader,
-		"buildInfluxDB":                      buildInfluxDB,
 		"enforceRegexModifier":               enforceRegexModifier,
 		"buildCustomErrorDeps":               buildCustomErrorDeps,
 		"buildCustomErrorLocationsPerServer": buildCustomErrorLocationsPerServer,
@@ -262,21 +273,24 @@ var (
 		"buildHTTPListener":                  buildHTTPListener,
 		"buildHTTPSListener":                 buildHTTPSListener,
 		"buildOpentracingForLocation":        buildOpentracingForLocation,
+		"buildOpentelemetryForLocation":      buildOpentelemetryForLocation,
 		"shouldLoadOpentracingModule":        shouldLoadOpentracingModule,
+		"shouldLoadOpentelemetryModule":      shouldLoadOpentelemetryModule,
 		"buildModSecurityForLocation":        buildModSecurityForLocation,
 		"buildMirrorLocations":               buildMirrorLocations,
 		"shouldLoadAuthDigestModule":         shouldLoadAuthDigestModule,
-		"shouldLoadInfluxDBModule":           shouldLoadInfluxDBModule,
 		"buildServerName":                    buildServerName,
+		"buildCorsOriginRegex":               buildCorsOriginRegex,
 	}
 )
 
 // escapeLiteralDollar will replace the $ character with ${literal_dollar}
 // which is made to work via the following configuration in the http section of
 // the template:
-// geo $literal_dollar {
-//     default "$";
-// }
+//
+//	geo $literal_dollar {
+//	    default "$";
+//	}
 func escapeLiteralDollar(input interface{}) string {
 	inputStr, ok := input.(string)
 	if !ok {
@@ -565,7 +579,14 @@ func shouldApplyGlobalAuth(input interface{}, globalExternalAuthURL string) bool
 	return false
 }
 
-func buildAuthResponseHeaders(proxySetHeader string, headers []string) []string {
+// buildAuthResponseHeaders sets HTTP response headers when `auth-url` is used.
+// Based on `auth-keepalive` value we use auth_request_set Nginx directives, or
+// we use Lua and Nginx variables instead.
+//
+// NOTE: Unfortunately auth_request module ignores the keepalive directive (see:
+// https://trac.nginx.org/nginx/ticket/1579), that is why we mimic the same
+// functionality with access_by_lua_block.
+func buildAuthResponseHeaders(proxySetHeader string, headers []string, lua bool) []string {
 	res := []string{}
 
 	if len(headers) == 0 {
@@ -573,10 +594,27 @@ func buildAuthResponseHeaders(proxySetHeader string, headers []string) []string 
 	}
 
 	for i, h := range headers {
-		hvar := strings.ToLower(h)
-		hvar = strings.NewReplacer("-", "_").Replace(hvar)
-		res = append(res, fmt.Sprintf("auth_request_set $authHeader%v $upstream_http_%v;", i, hvar))
+		if lua {
+			res = append(res, fmt.Sprintf("set $authHeader%d '';", i))
+		} else {
+			hvar := strings.ToLower(h)
+			hvar = strings.NewReplacer("-", "_").Replace(hvar)
+			res = append(res, fmt.Sprintf("auth_request_set $authHeader%v $upstream_http_%v;", i, hvar))
+		}
 		res = append(res, fmt.Sprintf("%s '%v' $authHeader%v;", proxySetHeader, h, i))
+	}
+	return res
+}
+
+func buildAuthUpstreamLuaHeaders(headers []string) []string {
+	res := []string{}
+
+	if len(headers) == 0 {
+		return res
+	}
+
+	for i, h := range headers {
+		res = append(res, fmt.Sprintf("ngx.var.authHeader%d = res.header['%s']", i, h))
 	}
 	return res
 }
@@ -593,6 +631,76 @@ func buildAuthProxySetHeaders(headers map[string]string) []string {
 	}
 	sort.Strings(res)
 	return res
+}
+
+func buildAuthUpstreamName(input interface{}, host string) string {
+	authPath := buildAuthLocation(input, "")
+	if authPath == "" || host == "" {
+		return ""
+	}
+
+	return fmt.Sprintf("%s-%s", host, authPath[2:])
+}
+
+// shouldApplyAuthUpstream returns true only in case when ExternalAuth.URL and
+// ExternalAuth.KeepaliveConnections are all set
+func shouldApplyAuthUpstream(l interface{}, c interface{}) bool {
+	location, ok := l.(*ingress.Location)
+	if !ok {
+		klog.Errorf("expected an '*ingress.Location' type but %T was returned", l)
+		return false
+	}
+
+	cfg, ok := c.(config.Configuration)
+	if !ok {
+		klog.Errorf("expected a 'config.Configuration' type but %T was returned", c)
+		return false
+	}
+
+	if location.ExternalAuth.URL == "" || location.ExternalAuth.KeepaliveConnections == 0 {
+		return false
+	}
+
+	// Unfortunately, `auth_request` module ignores keepalive in upstream block: https://trac.nginx.org/nginx/ticket/1579
+	// The workaround is to use `ngx.location.capture` Lua subrequests but it is not supported with HTTP/2
+	if cfg.UseHTTP2 {
+		klog.Warning("Upstream keepalive is not supported with HTTP/2")
+		return false
+	}
+
+	return true
+}
+
+// extractHostPort will extract the host:port part from the URL specified by url
+func extractHostPort(url string) string {
+	if url == "" {
+		return ""
+	}
+
+	authURL, err := parser.StringToURL(url)
+	if err != nil {
+		klog.Errorf("expected a valid URL but %s was returned", url)
+		return ""
+	}
+
+	return authURL.Host
+}
+
+// changeHostPort will change the host:port part of the url to value
+func changeHostPort(url string, value string) string {
+	if url == "" {
+		return ""
+	}
+
+	authURL, err := parser.StringToURL(url)
+	if err != nil {
+		klog.Errorf("expected a valid URL but %s was returned", url)
+		return ""
+	}
+
+	authURL.Host = value
+
+	return authURL.String()
 }
 
 // buildProxyPass produces the proxy pass string, if the ingress has redirects
@@ -684,7 +792,7 @@ rewrite "(?i)%s" %s break;
 
 func filterRateLimits(input interface{}) []ratelimit.Config {
 	ratelimits := []ratelimit.Config{}
-	found := sets.String{}
+	found := sets.Set[string]{}
 
 	servers, ok := input.([]*ingress.Server)
 	if !ok {
@@ -707,12 +815,12 @@ func filterRateLimits(input interface{}) []ratelimit.Config {
 // for connection limit by IP address, one for limiting requests per minute, and
 // one for limiting requests per second.
 func buildRateLimitZones(input interface{}) []string {
-	zones := sets.String{}
+	zones := sets.Set[string]{}
 
 	servers, ok := input.([]*ingress.Server)
 	if !ok {
 		klog.Errorf("expected a '[]*ingress.Server' type but %T was returned", input)
-		return zones.List()
+		return zones.UnsortedList()
 	}
 
 	for _, server := range servers {
@@ -751,7 +859,7 @@ func buildRateLimitZones(input interface{}) []string {
 		}
 	}
 
-	return zones.List()
+	return zones.UnsortedList()
 }
 
 // buildRateLimit produces an array of limit_req to be used inside the Path of
@@ -1131,27 +1239,31 @@ func buildOpentracing(c interface{}, s interface{}) string {
 	return buf.String()
 }
 
-// buildInfluxDB produces the single line configuration
-// needed by the InfluxDB module to send request's metrics
-// for the current resource
-func buildInfluxDB(input interface{}) string {
-	cfg, ok := input.(influxdb.Config)
+func buildOpentelemetry(c interface{}, s interface{}) string {
+	cfg, ok := c.(config.Configuration)
 	if !ok {
-		klog.Errorf("expected an 'influxdb.Config' type but %T was returned", input)
+		klog.Errorf("expected a 'config.Configuration' type but %T was returned", c)
 		return ""
 	}
 
-	if !cfg.InfluxDBEnabled {
+	servers, ok := s.([]*ingress.Server)
+	if !ok {
+		klog.Errorf("expected an '[]*ingress.Server' type but %T was returned", s)
 		return ""
 	}
 
-	return fmt.Sprintf(
-		"influxdb server_name=%s host=%s port=%s measurement=%s enabled=true;",
-		cfg.InfluxDBServerName,
-		cfg.InfluxDBHost,
-		cfg.InfluxDBPort,
-		cfg.InfluxDBMeasurement,
-	)
+	if !shouldLoadOpentelemetryModule(cfg, servers) {
+		return ""
+	}
+
+	buf := bytes.NewBufferString("")
+
+	buf.WriteString("\r\n")
+
+	if cfg.OpentelemetryOperationName != "" {
+		buf.WriteString(fmt.Sprintf("opentelemetry_operation_name \"%s\";\n", cfg.OpentelemetryOperationName))
+	}
+	return buf.String()
 }
 
 func proxySetHeader(loc interface{}) string {
@@ -1170,15 +1282,17 @@ func proxySetHeader(loc interface{}) string {
 
 // buildCustomErrorDeps is a utility function returning a struct wrapper with
 // the data required to build the 'CUSTOM_ERRORS' template
-func buildCustomErrorDeps(upstreamName string, errorCodes []int, enableMetrics bool) interface{} {
+func buildCustomErrorDeps(upstreamName string, errorCodes []int, enableMetrics bool, modsecurityEnabled bool) interface{} {
 	return struct {
-		UpstreamName  string
-		ErrorCodes    []int
-		EnableMetrics bool
+		UpstreamName       string
+		ErrorCodes         []int
+		EnableMetrics      bool
+		ModsecurityEnabled bool
 	}{
-		UpstreamName:  upstreamName,
-		ErrorCodes:    errorCodes,
-		EnableMetrics: enableMetrics,
+		UpstreamName:       upstreamName,
+		ErrorCodes:         errorCodes,
+		EnableMetrics:      enableMetrics,
+		ModsecurityEnabled: modsecurityEnabled,
 	}
 }
 
@@ -1248,6 +1362,13 @@ func opentracingPropagateContext(location *ingress.Location) string {
 	}
 
 	return "opentracing_propagate_context;"
+}
+
+func opentelemetryPropagateContext(location *ingress.Location) string {
+	if location == nil {
+		return ""
+	}
+	return "opentelemetry_propagate;"
 }
 
 // shouldLoadModSecurityModule determines whether or not the ModSecurity module needs to be loaded.
@@ -1440,7 +1561,7 @@ func httpsListener(addresses []string, co string, tc config.TemplateConfig) []st
 	return out
 }
 
-func buildOpentracingForLocation(isOTEnabled bool, location *ingress.Location) string {
+func buildOpentracingForLocation(isOTEnabled bool, isOTTrustSet bool, location *ingress.Location) string {
 	isOTEnabledInLoc := location.Opentracing.Enabled
 	isOTSetInLoc := location.Opentracing.Set
 
@@ -1448,25 +1569,51 @@ func buildOpentracingForLocation(isOTEnabled bool, location *ingress.Location) s
 		if isOTSetInLoc && !isOTEnabledInLoc {
 			return "opentracing off;"
 		}
-
-		opc := opentracingPropagateContext(location)
-		if opc != "" {
-			opc = fmt.Sprintf("opentracing on;\n%v", opc)
-		}
-
-		return opc
+	} else if !isOTSetInLoc || !isOTEnabledInLoc {
+		return ""
 	}
 
-	if isOTSetInLoc && isOTEnabledInLoc {
-		opc := opentracingPropagateContext(location)
-		if opc != "" {
-			opc = fmt.Sprintf("opentracing on;\n%v", opc)
-		}
-
-		return opc
+	opc := opentracingPropagateContext(location)
+	if opc != "" {
+		opc = fmt.Sprintf("opentracing on;\n%v", opc)
 	}
 
-	return ""
+	if (!isOTTrustSet && !location.Opentracing.TrustSet) ||
+		(location.Opentracing.TrustSet && !location.Opentracing.TrustEnabled) {
+		opc = opc + "\nopentracing_trust_incoming_span off;"
+	}
+
+	return opc
+}
+
+func buildOpentelemetryForLocation(isOTEnabled bool, isOTTrustSet bool, location *ingress.Location) string {
+	isOTEnabledInLoc := location.Opentelemetry.Enabled
+	isOTSetInLoc := location.Opentelemetry.Set
+
+	if isOTEnabled {
+		if isOTSetInLoc && !isOTEnabledInLoc {
+			return "opentelemetry off;"
+		}
+	} else if !isOTSetInLoc || !isOTEnabledInLoc {
+		return ""
+	}
+
+	opc := opentelemetryPropagateContext(location)
+	if opc != "" {
+		opc = fmt.Sprintf("opentelemetry on;\n%v", opc)
+	}
+
+	if location.Opentelemetry.OperationName != "" {
+		opc = opc + "\nopentelemetry_operation_name " + location.Opentelemetry.OperationName + ";"
+	}
+
+	if (!isOTTrustSet && !location.Opentelemetry.TrustSet) ||
+		(location.Opentelemetry.TrustSet && !location.Opentelemetry.TrustEnabled) {
+		opc = opc + "\nopentelemetry_trust_incoming_spans off;"
+	} else {
+		opc = opc + "\nopentelemetry_trust_incoming_spans on;"
+	}
+	return opc
 }
 
 // shouldLoadOpentracingModule determines whether or not the Opentracing module needs to be loaded.
@@ -1497,6 +1644,35 @@ func shouldLoadOpentracingModule(c interface{}, s interface{}) bool {
 		}
 	}
 
+	return false
+}
+
+// shouldLoadOpentelemetryModule determines whether or not the Opentelemetry module needs to be loaded.
+// It checks if `enable-opentelemetry` is set in the ConfigMap.
+func shouldLoadOpentelemetryModule(c interface{}, s interface{}) bool {
+	cfg, ok := c.(config.Configuration)
+	if !ok {
+		klog.Errorf("expected a 'config.Configuration' type but %T was returned", c)
+		return false
+	}
+
+	servers, ok := s.([]*ingress.Server)
+	if !ok {
+		klog.Errorf("expected an '[]*ingress.Server' type but %T was returned", s)
+		return false
+	}
+
+	if cfg.EnableOpentelemetry {
+		return true
+	}
+
+	for _, server := range servers {
+		for _, location := range server.Locations {
+			if location.Opentelemetry.Enabled {
+				return true
+			}
+		}
+	}
 	return false
 }
 
@@ -1532,7 +1708,7 @@ func buildModSecurityForLocation(cfg config.Configuration, location *ingress.Loc
 `, location.ModSecurity.TransactionID))
 	}
 
-	if !isMSEnabled {
+	if !isMSEnabled && location.ModSecurity.Snippet == "" {
 		buffer.WriteString(`modsecurity_rules_file /etc/nginx/modsecurity/modsecurity.conf;
 `)
 	}
@@ -1548,10 +1724,10 @@ func buildModSecurityForLocation(cfg config.Configuration, location *ingress.Loc
 func buildMirrorLocations(locs []*ingress.Location) string {
 	var buffer bytes.Buffer
 
-	mapped := sets.String{}
+	mapped := sets.Set[string]{}
 
 	for _, loc := range locs {
-		if loc.Mirror.Source == "" || loc.Mirror.Target == "" {
+		if loc.Mirror.Source == "" || loc.Mirror.Target == "" || loc.Mirror.Host == "" {
 			continue
 		}
 
@@ -1562,10 +1738,11 @@ func buildMirrorLocations(locs []*ingress.Location) string {
 		mapped.Insert(loc.Mirror.Source)
 		buffer.WriteString(fmt.Sprintf(`location = %v {
 internal;
-proxy_pass %v;
+proxy_set_header Host "%v";
+proxy_pass "%v";
 }
 
-`, loc.Mirror.Source, loc.Mirror.Target))
+`, loc.Mirror.Source, loc.Mirror.Host, loc.Mirror.Target))
 	}
 
 	return buffer.String()
@@ -1594,25 +1771,6 @@ func shouldLoadAuthDigestModule(s interface{}) bool {
 	return false
 }
 
-// shouldLoadInfluxDBModule determines whether or not the ngx_http_auth_digest_module module needs to be loaded.
-func shouldLoadInfluxDBModule(s interface{}) bool {
-	servers, ok := s.([]*ingress.Server)
-	if !ok {
-		klog.Errorf("expected an '[]*ingress.Server' type but %T was returned", s)
-		return false
-	}
-
-	for _, server := range servers {
-		for _, location := range server.Locations {
-			if location.InfluxDB.InfluxDBEnabled {
-				return true
-			}
-		}
-	}
-
-	return false
-}
-
 // buildServerName ensures wildcard hostnames are valid
 func buildServerName(hostname string) string {
 	if !strings.HasPrefix(hostname, "*") {
@@ -1625,7 +1783,7 @@ func buildServerName(hostname string) string {
 	return `~^(?<subdomain>[\w-]+)\.` + strings.Join(parts, "\\.") + `$`
 }
 
-// parseComplexNGINXVar parses things like "$my${complex}ngx\$var" into
+// parseComplexNginxVarIntoLuaTable parses things like "$my${complex}ngx\$var" into
 // [["$var", "complex", "my", "ngx"]]. In other words, 2nd and 3rd elements
 // in the result are actual NGINX variable names, whereas first and 4th elements
 // are string literals.
@@ -1671,4 +1829,30 @@ func convertGoSliceIntoLuaTable(goSliceInterface interface{}, emptyStringAsNil b
 	default:
 		return "", fmt.Errorf("could not process type: %s", kind)
 	}
+}
+
+func buildOriginRegex(origin string) string {
+	origin = regexp.QuoteMeta(origin)
+	origin = strings.Replace(origin, "\\*", `[A-Za-z0-9\-]+`, 1)
+	return fmt.Sprintf("(%s)", origin)
+}
+
+func buildCorsOriginRegex(corsOrigins []string) string {
+	if len(corsOrigins) == 1 && corsOrigins[0] == "*" {
+		return "set $http_origin *;\nset $cors 'true';"
+	}
+
+	var originsRegex string = "if ($http_origin ~* ("
+	for i, origin := range corsOrigins {
+		originTrimmed := strings.TrimSpace(origin)
+		if len(originTrimmed) > 0 {
+			builtOrigin := buildOriginRegex(originTrimmed)
+			originsRegex += builtOrigin
+			if i != len(corsOrigins)-1 {
+				originsRegex = originsRegex + "|"
+			}
+		}
+	}
+	originsRegex = originsRegex + ")$ ) { set $cors 'true'; }"
+	return originsRegex
 }

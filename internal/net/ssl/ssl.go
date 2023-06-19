@@ -39,11 +39,13 @@ import (
 
 	"github.com/zakjan/cert-chain-resolver/certUtil"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/ingress-nginx/internal/file"
-	"k8s.io/ingress-nginx/internal/ingress"
+
+	"k8s.io/ingress-nginx/pkg/apis/ingress"
+
 	ngx_config "k8s.io/ingress-nginx/internal/ingress/controller/config"
-	"k8s.io/ingress-nginx/internal/watch"
-	"k8s.io/klog/v2"
+	"k8s.io/ingress-nginx/pkg/util/file"
+
+	klog "k8s.io/klog/v2"
 )
 
 // FakeSSLCertificateUID defines the default UID to use for the fake SSL
@@ -79,7 +81,7 @@ func CreateSSLCert(cert, key []byte, uid string) (*ingress.SSLCert, error) {
 		}
 	}
 
-	pemCertBuffer.Write([]byte("\n"))
+	pemCertBuffer.WriteString("\n")
 	pemCertBuffer.Write(key)
 
 	pemBlock, _ := pem.Decode(pemCertBuffer.Bytes())
@@ -193,12 +195,12 @@ func StoreSSLCertOnDisk(name string, sslCert *ingress.SSLCert) (string, error) {
 func ConfigureCACertWithCertAndKey(name string, ca []byte, sslCert *ingress.SSLCert) error {
 	var buffer bytes.Buffer
 
-	_, err := buffer.Write([]byte(sslCert.PemCertKey))
+	_, err := buffer.WriteString(sslCert.PemCertKey)
 	if err != nil {
 		return fmt.Errorf("could not append newline to cert file %v: %v", sslCert.CAFileName, err)
 	}
 
-	_, err = buffer.Write([]byte("\n"))
+	_, err = buffer.WriteString("\n")
 	if err != nil {
 		return fmt.Errorf("could not append newline to cert file %v: %v", sslCert.CAFileName, err)
 	}
@@ -506,8 +508,8 @@ func NewTLSListener(certificate, key string) *TLSListener {
 
 	l.load()
 
-	_, _ = watch.NewFileWatcher(certificate, l.load)
-	_, _ = watch.NewFileWatcher(key, l.load)
+	_, _ = file.NewFileWatcher(certificate, l.load)
+	_, _ = file.NewFileWatcher(key, l.load)
 
 	return &l
 }

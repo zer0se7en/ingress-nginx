@@ -34,15 +34,15 @@ import (
 	networking "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"k8s.io/ingress-nginx/internal/ingress"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/authreq"
-	"k8s.io/ingress-nginx/internal/ingress/annotations/influxdb"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/modsecurity"
+	"k8s.io/ingress-nginx/internal/ingress/annotations/opentelemetry"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/opentracing"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/ratelimit"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/rewrite"
 	"k8s.io/ingress-nginx/internal/ingress/controller/config"
 	"k8s.io/ingress-nginx/internal/nginx"
+	"k8s.io/ingress-nginx/pkg/apis/ingress"
 )
 
 func init() {
@@ -502,14 +502,49 @@ func TestShouldApplyGlobalAuth(t *testing.T) {
 
 func TestBuildAuthResponseHeaders(t *testing.T) {
 	externalAuthResponseHeaders := []string{"h1", "H-With-Caps-And-Dashes"}
-	expected := []string{
-		"auth_request_set $authHeader0 $upstream_http_h1;",
-		"proxy_set_header 'h1' $authHeader0;",
-		"auth_request_set $authHeader1 $upstream_http_h_with_caps_and_dashes;",
-		"proxy_set_header 'H-With-Caps-And-Dashes' $authHeader1;",
+	tests := []struct {
+		headers  []string
+		expected []string
+		lua      bool
+	}{
+		{
+			headers: externalAuthResponseHeaders,
+			lua:     false,
+			expected: []string{
+				"auth_request_set $authHeader0 $upstream_http_h1;",
+				"proxy_set_header 'h1' $authHeader0;",
+				"auth_request_set $authHeader1 $upstream_http_h_with_caps_and_dashes;",
+				"proxy_set_header 'H-With-Caps-And-Dashes' $authHeader1;",
+			},
+		},
+		{
+			headers: externalAuthResponseHeaders,
+			lua:     true,
+			expected: []string{
+				"set $authHeader0 '';",
+				"proxy_set_header 'h1' $authHeader0;",
+				"set $authHeader1 '';",
+				"proxy_set_header 'H-With-Caps-And-Dashes' $authHeader1;",
+			},
+		},
 	}
 
-	headers := buildAuthResponseHeaders(proxySetHeader(nil), externalAuthResponseHeaders)
+	for _, test := range tests {
+		got := buildAuthResponseHeaders(proxySetHeader(nil), test.headers, test.lua)
+		if !reflect.DeepEqual(test.expected, got) {
+			t.Errorf("Expected \n'%v'\nbut returned \n'%v'", test.expected, got)
+		}
+	}
+}
+
+func TestBuildAuthResponseLua(t *testing.T) {
+	externalAuthResponseHeaders := []string{"h1", "H-With-Caps-And-Dashes"}
+	expected := []string{
+		"ngx.var.authHeader0 = res.header['h1']",
+		"ngx.var.authHeader1 = res.header['H-With-Caps-And-Dashes']",
+	}
+
+	headers := buildAuthUpstreamLuaHeaders(externalAuthResponseHeaders)
 
 	if !reflect.DeepEqual(expected, headers) {
 		t.Errorf("Expected \n'%v'\nbut returned \n'%v'", expected, headers)
@@ -530,6 +565,139 @@ func TestBuildAuthProxySetHeaders(t *testing.T) {
 
 	if !reflect.DeepEqual(expected, headers) {
 		t.Errorf("Expected \n'%v'\nbut returned \n'%v'", expected, headers)
+	}
+}
+
+func TestBuildAuthUpstreamName(t *testing.T) {
+	invalidType := &ingress.Ingress{}
+	expected := ""
+	actual := buildAuthUpstreamName(invalidType, "")
+
+	if !reflect.DeepEqual(expected, actual) {
+		t.Errorf("Expected '%v' but returned '%v'", expected, actual)
+	}
+
+	loc := &ingress.Location{
+		ExternalAuth: authreq.Config{
+			URL: "foo.com/auth",
+		},
+		Path: "/cat",
+	}
+
+	encodedAuthURL := strings.Replace(base64.URLEncoding.EncodeToString([]byte(loc.Path)), "=", "", -1)
+	externalAuthPath := fmt.Sprintf("external-auth-%v-default", encodedAuthURL)
+
+	testCases := []struct {
+		title    string
+		host     string
+		expected string
+	}{
+		{"valid host", "auth.my.site", fmt.Sprintf("%s-%s", "auth.my.site", externalAuthPath)},
+		{"valid host", "your.auth.site", fmt.Sprintf("%s-%s", "your.auth.site", externalAuthPath)},
+		{"empty host", "", ""},
+	}
+
+	for _, testCase := range testCases {
+		str := buildAuthUpstreamName(loc, testCase.host)
+		if str != testCase.expected {
+			t.Errorf("%v: expected '%v' but returned '%v'", testCase.title, testCase.expected, str)
+		}
+	}
+}
+
+func TestShouldApplyAuthUpstream(t *testing.T) {
+	authURL := "foo.com/auth"
+
+	loc := &ingress.Location{
+		ExternalAuth: authreq.Config{
+			URL:                  authURL,
+			KeepaliveConnections: 0,
+		},
+		Path: "/cat",
+	}
+
+	cfg := config.Configuration{
+		UseHTTP2: false,
+	}
+
+	testCases := []struct {
+		title                string
+		authURL              string
+		keepaliveConnections int
+		expected             bool
+	}{
+		{"authURL, no keepalive", authURL, 0, false},
+		{"authURL, keepalive", authURL, 10, true},
+		{"empty, no keepalive", "", 0, false},
+		{"empty, keepalive", "", 10, false},
+	}
+
+	for _, testCase := range testCases {
+		loc.ExternalAuth.URL = testCase.authURL
+		loc.ExternalAuth.KeepaliveConnections = testCase.keepaliveConnections
+
+		result := shouldApplyAuthUpstream(loc, cfg)
+		if result != testCase.expected {
+			t.Errorf("%v: expected '%v' but returned '%v'", testCase.title, testCase.expected, result)
+		}
+	}
+
+	// keepalive is not supported with UseHTTP2
+	cfg.UseHTTP2 = true
+	for _, testCase := range testCases {
+		loc.ExternalAuth.URL = testCase.authURL
+		loc.ExternalAuth.KeepaliveConnections = testCase.keepaliveConnections
+
+		result := shouldApplyAuthUpstream(loc, cfg)
+		if result != false {
+			t.Errorf("%v: expected '%v' but returned '%v'", testCase.title, false, result)
+		}
+	}
+}
+
+func TestExtractHostPort(t *testing.T) {
+	testCases := []struct {
+		title    string
+		url      string
+		expected string
+	}{
+		{"full URL", "https://my.auth.site:5000/path", "my.auth.site:5000"},
+		{"URL with no port", "http://my.auth.site/path", "my.auth.site"},
+		{"URL with no path", "https://my.auth.site:5000", "my.auth.site:5000"},
+		{"URL no port and path", "http://my.auth.site", "my.auth.site"},
+		{"missing method", "my.auth.site/path", ""},
+		{"all empty", "", ""},
+	}
+
+	for _, testCase := range testCases {
+		result := extractHostPort(testCase.url)
+		if result != testCase.expected {
+			t.Errorf("%v: expected '%v' but returned '%v'", testCase.title, testCase.expected, result)
+		}
+	}
+}
+
+func TestChangeHostPort(t *testing.T) {
+	testCases := []struct {
+		title    string
+		url      string
+		host     string
+		expected string
+	}{
+		{"full URL", "https://my.auth.site:5000/path", "your.domain", "https://your.domain/path"},
+		{"URL with no port", "http://my.auth.site/path", "your.domain", "http://your.domain/path"},
+		{"URL with no path", "http://my.auth.site:5000", "your.domain:8888", "http://your.domain:8888"},
+		{"URL with no port and path", "https://my.auth.site", "your.domain:8888", "https://your.domain:8888"},
+		{"invalid host", "my.auth.site/path", "", ""},
+		{"missing method", "my.auth.site/path", "your.domain", ""},
+		{"all empty", "", "", ""},
+	}
+
+	for _, testCase := range testCases {
+		result := changeHostPort(testCase.url, testCase.host)
+		if result != testCase.expected {
+			t.Errorf("%v: expected '%v' but returned '%v'", testCase.title, testCase.expected, result)
+		}
 	}
 }
 
@@ -976,6 +1144,26 @@ func TestOpentracingPropagateContext(t *testing.T) {
 
 	for loc, expectedDirective := range tests {
 		actualDirective := opentracingPropagateContext(loc)
+		if actualDirective != expectedDirective {
+			t.Errorf("Expected %v but returned %v", expectedDirective, actualDirective)
+		}
+	}
+}
+
+func TestOpentelemetryPropagateContext(t *testing.T) {
+	tests := map[*ingress.Location]string{
+		{BackendProtocol: "HTTP"}:      "opentelemetry_propagate;",
+		{BackendProtocol: "HTTPS"}:     "opentelemetry_propagate;",
+		{BackendProtocol: "AUTO_HTTP"}: "opentelemetry_propagate;",
+		{BackendProtocol: "GRPC"}:      "opentelemetry_propagate;",
+		{BackendProtocol: "GRPCS"}:     "opentelemetry_propagate;",
+		{BackendProtocol: "AJP"}:       "opentelemetry_propagate;",
+		{BackendProtocol: "FCGI"}:      "opentelemetry_propagate;",
+		nil:                            "",
+	}
+
+	for loc, expectedDirective := range tests {
+		actualDirective := opentelemetryPropagateContext(loc)
 		if actualDirective != expectedDirective {
 			t.Errorf("Expected %v but returned %v", expectedDirective, actualDirective)
 		}
@@ -1451,30 +1639,6 @@ func TestProxySetHeader(t *testing.T) {
 	}
 }
 
-func TestBuildInfluxDB(t *testing.T) {
-	invalidType := &ingress.Ingress{}
-	expected := ""
-	actual := buildInfluxDB(invalidType)
-
-	if expected != actual {
-		t.Errorf("Expected '%v' but returned '%v'", expected, actual)
-	}
-
-	cfg := influxdb.Config{
-		InfluxDBEnabled:     true,
-		InfluxDBServerName:  "ok.com",
-		InfluxDBHost:        "host.com",
-		InfluxDBPort:        "5252",
-		InfluxDBMeasurement: "ok",
-	}
-	expected = "influxdb server_name=ok.com host=host.com port=5252 measurement=ok enabled=true;"
-	actual = buildInfluxDB(cfg)
-
-	if expected != actual {
-		t.Errorf("Expected '%v' but returned '%v'", expected, actual)
-	}
-}
-
 func TestBuildOpenTracing(t *testing.T) {
 	invalidType := &ingress.Ingress{}
 	expected := ""
@@ -1553,6 +1717,37 @@ func TestBuildOpenTracing(t *testing.T) {
 		t.Errorf("Expected '%v' but returned '%v'", expected, actual)
 	}
 
+}
+
+func TestBuildOpenTelemetry(t *testing.T) {
+	invalidType := &ingress.Ingress{}
+	expected := ""
+	actual := buildOpentelemetry(invalidType, []*ingress.Server{})
+
+	if expected != actual {
+		t.Errorf("Expected '%v' but returned '%v'", expected, actual)
+	}
+
+	cfgNoHost := config.Configuration{
+		EnableOpentelemetry: true,
+	}
+	expected = "\r\n"
+	actual = buildOpentelemetry(cfgNoHost, []*ingress.Server{})
+
+	if expected != actual {
+		t.Errorf("Expected '%v' but returned '%v'", expected, actual)
+	}
+
+	cfgOpenTelemetry := config.Configuration{
+		EnableOpentelemetry:        true,
+		OpentelemetryOperationName: "my-operation-name",
+	}
+	expected = "\r\n"
+	expected += "opentelemetry_operation_name \"my-operation-name\";\n"
+	actual = buildOpentelemetry(cfgOpenTelemetry, []*ingress.Server{})
+	if expected != actual {
+		t.Errorf("Expected '%v' but returned '%v'", expected, actual)
+	}
 }
 
 func TestEnforceRegexModifier(t *testing.T) {
@@ -1637,32 +1832,44 @@ func TestShouldLoadModSecurityModule(t *testing.T) {
 
 func TestOpentracingForLocation(t *testing.T) {
 	trueVal := true
+	falseVal := false
 
 	loadOT := `opentracing on;
 opentracing_propagate_context;`
+	loadOTUntrustedSpan := `opentracing on;
+opentracing_propagate_context;
+opentracing_trust_incoming_span off;`
 	testCases := []struct {
-		description string
-		globalOT    bool
-		isSetInLoc  bool
-		isOTInLoc   *bool
-		expected    string
+		description     string
+		globalOT        bool
+		isSetInLoc      bool
+		isOTInLoc       *bool
+		globalTrust     bool
+		isTrustSetInLoc bool
+		isTrustInLoc    *bool
+		expected        string
 	}{
-		{"globally enabled, without annotation", true, false, nil, loadOT},
-		{"globally enabled and enabled in location", true, true, &trueVal, loadOT},
-		{"globally disabled and not enabled in location", false, false, nil, ""},
-		{"globally disabled but enabled in location", false, true, &trueVal, loadOT},
-		{"globally disabled, enabled in location but false", false, true, &trueVal, loadOT},
+		{"globally enabled, without annotation", true, false, nil, true, false, nil, loadOT},
+		{"globally enabled and enabled in location", true, true, &trueVal, true, false, nil, loadOT},
+		{"globally disabled and not enabled in location", false, false, nil, true, false, nil, ""},
+		{"globally disabled but enabled in location", false, true, &trueVal, true, false, nil, loadOT},
+		{"globally trusted, not trusted in location", true, false, nil, true, true, &falseVal, loadOTUntrustedSpan},
+		{"not globally trusted, trust set in location", true, false, nil, false, true, &trueVal, loadOT},
+		{"not globally trusted, trust not set in location", true, false, nil, false, false, nil, loadOTUntrustedSpan},
 	}
 
 	for _, testCase := range testCases {
 		il := &ingress.Location{
-			Opentracing: opentracing.Config{Set: testCase.isSetInLoc},
+			Opentracing: opentracing.Config{Set: testCase.isSetInLoc, TrustSet: testCase.isTrustSetInLoc},
 		}
 		if il.Opentracing.Set {
 			il.Opentracing.Enabled = *testCase.isOTInLoc
 		}
+		if il.Opentracing.TrustSet {
+			il.Opentracing.TrustEnabled = *testCase.isTrustInLoc
+		}
 
-		actual := buildOpentracingForLocation(testCase.globalOT, il)
+		actual := buildOpentracingForLocation(testCase.globalOT, testCase.globalTrust, il)
 
 		if testCase.expected != actual {
 			t.Errorf("%v: expected '%v' but returned '%v'", testCase.description, testCase.expected, actual)
@@ -1723,6 +1930,107 @@ func TestShouldLoadOpentracingModule(t *testing.T) {
 	}
 }
 
+func TestOpentelemetryForLocation(t *testing.T) {
+	trueVal := true
+	falseVal := false
+
+	loadOT := `opentelemetry on;
+opentelemetry_propagate;
+opentelemetry_trust_incoming_spans on;`
+	loadOTUntrustedSpan := `opentelemetry on;
+opentelemetry_propagate;
+opentelemetry_trust_incoming_spans off;`
+	testCases := []struct {
+		description     string
+		globalOT        bool
+		isSetInLoc      bool
+		isOTInLoc       *bool
+		globalTrust     bool
+		isTrustSetInLoc bool
+		isTrustInLoc    *bool
+		expected        string
+	}{
+		{"globally enabled, without annotation", true, false, nil, true, false, nil, loadOT},
+		{"globally enabled and enabled in location", true, true, &trueVal, true, false, nil, loadOT},
+		{"globally disabled and not enabled in location", false, false, nil, true, false, nil, ""},
+		{"globally disabled but enabled in location", false, true, &trueVal, true, false, nil, loadOT},
+		{"globally trusted, not trusted in location", true, false, nil, true, true, &falseVal, loadOTUntrustedSpan},
+		{"not globally trusted, trust set in location", true, false, nil, false, true, &trueVal, loadOT},
+		{"not globally trusted, trust not set in location", true, false, nil, false, false, nil, loadOTUntrustedSpan},
+	}
+
+	for _, testCase := range testCases {
+		il := &ingress.Location{
+			Opentelemetry: opentelemetry.Config{Set: testCase.isSetInLoc, TrustSet: testCase.isTrustSetInLoc},
+		}
+		if il.Opentelemetry.Set {
+			il.Opentelemetry.Enabled = *testCase.isOTInLoc
+		}
+		if il.Opentelemetry.TrustSet {
+			il.Opentelemetry.TrustEnabled = *testCase.isTrustInLoc
+		}
+
+		actual := buildOpentelemetryForLocation(testCase.globalOT, testCase.globalTrust, il)
+
+		if testCase.expected != actual {
+			t.Errorf("%v: expected '%v' but returned '%v'", testCase.description, testCase.expected, actual)
+		}
+	}
+}
+
+func TestShouldLoadOpentelemetryModule(t *testing.T) {
+	// ### Invalid argument type tests ###
+	// The first tests should return false.
+	expected := false
+
+	invalidType := &ingress.Ingress{}
+	actual := shouldLoadOpentelemetryModule(config.Configuration{}, invalidType)
+	if expected != actual {
+		t.Errorf("Expected '%v' but returned '%v'", expected, actual)
+	}
+
+	actual = shouldLoadOpentelemetryModule(invalidType, []*ingress.Server{})
+	if expected != actual {
+		t.Errorf("Expected '%v' but returned '%v'", expected, actual)
+	}
+
+	// ### Functional tests ###
+	actual = shouldLoadOpentelemetryModule(config.Configuration{}, []*ingress.Server{})
+	if expected != actual {
+		t.Errorf("Expected '%v' but returned '%v'", expected, actual)
+	}
+
+	// All further tests should return true.
+	expected = true
+
+	configuration := config.Configuration{EnableOpentelemetry: true}
+	actual = shouldLoadOpentelemetryModule(configuration, []*ingress.Server{})
+	if expected != actual {
+		t.Errorf("Expected '%v' but returned '%v'", expected, actual)
+	}
+
+	servers := []*ingress.Server{
+		{
+			Locations: []*ingress.Location{
+				{
+					Opentelemetry: opentelemetry.Config{
+						Enabled: true,
+					},
+				},
+			},
+		},
+	}
+	actual = shouldLoadOpentelemetryModule(config.Configuration{}, servers)
+	if expected != actual {
+		t.Errorf("Expected '%v' but returned '%v'", expected, actual)
+	}
+
+	actual = shouldLoadOpentelemetryModule(configuration, servers)
+	if expected != actual {
+		t.Errorf("Expected '%v' but returned '%v'", expected, actual)
+	}
+}
+
 func TestModSecurityForLocation(t *testing.T) {
 	loadModule := `modsecurity on;
 `
@@ -1769,8 +2077,8 @@ func TestModSecurityForLocation(t *testing.T) {
 		{"configmap enabled, configmap OWASP enabled, annotation enabled, OWASP disabled", true, true, true, true, false, "", "", ""},
 		{"configmap disabled, annotation enabled, OWASP disabled", false, false, true, true, false, "", "", fmt.Sprintf("%v%v", loadModule, modSecCfg)},
 		{"configmap disabled, annotation disabled, OWASP disabled", false, false, false, true, false, "", "", ""},
-		{"configmap disabled, annotation enabled, OWASP disabled", false, false, true, true, false, testRule, "", fmt.Sprintf("%v%v%v", loadModule, modsecRule, modSecCfg)},
-		{"configmap disabled, annotation enabled, OWASP enabled", false, false, true, true, false, testRule, "", fmt.Sprintf("%v%v%v", loadModule, modsecRule, modSecCfg)},
+		{"configmap disabled, annotation enabled, OWASP disabled", false, false, true, true, false, testRule, "", fmt.Sprintf("%v%v", loadModule, modsecRule)},
+		{"configmap disabled, annotation enabled, OWASP enabled", false, false, true, true, false, testRule, "", fmt.Sprintf("%v%v", loadModule, modsecRule)},
 	}
 
 	for _, testCase := range testCases {

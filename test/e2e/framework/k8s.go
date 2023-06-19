@@ -22,12 +22,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 	appsv1 "k8s.io/api/apps/v1"
-	api "k8s.io/api/core/v1"
 	core "k8s.io/api/core/v1"
-	v1 "k8s.io/api/core/v1"
 	networking "k8s.io/api/networking/v1"
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -36,9 +34,9 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
-// EnsureSecret creates a Secret object or returns it if it already exists.
-func (f *Framework) EnsureSecret(secret *api.Secret) *api.Secret {
-	err := createSecretWithRetries(f.KubeClientSet, f.Namespace, secret)
+// EnsureSecret creates a Secret object or returns it.
+func (f *Framework) EnsureSecret(secret *core.Secret) *core.Secret {
+	err := createSecretWithRetries(f.KubeClientSet, secret.Namespace, secret)
 	assert.Nil(ginkgo.GinkgoT(), err, "creating secret")
 
 	s, err := f.KubeClientSet.CoreV1().Secrets(secret.Namespace).Get(context.TODO(), secret.Name, metav1.GetOptions{})
@@ -48,17 +46,30 @@ func (f *Framework) EnsureSecret(secret *api.Secret) *api.Secret {
 	return s
 }
 
-// EnsureConfigMap creates a ConfigMap object or returns it if it already exists.
-func (f *Framework) EnsureConfigMap(configMap *api.ConfigMap) (*api.ConfigMap, error) {
-	cm, err := f.KubeClientSet.CoreV1().ConfigMaps(f.Namespace).Create(context.TODO(), configMap, metav1.CreateOptions{})
-	if err != nil {
-		if k8sErrors.IsAlreadyExists(err) {
-			return f.KubeClientSet.CoreV1().ConfigMaps(f.Namespace).Update(context.TODO(), configMap, metav1.UpdateOptions{})
-		}
-		return nil, err
+// GetConfigMap gets a ConfigMap object from the given namespace, name and returns it, throws error if it does not exist.
+func (f *Framework) GetConfigMap(namespace string, name string) *core.ConfigMap {
+	cm, err := f.KubeClientSet.CoreV1().ConfigMaps(namespace).Get(context.TODO(), name, metav1.GetOptions{})
+	assert.Nil(ginkgo.GinkgoT(), err, "getting configmap")
+	assert.NotNil(ginkgo.GinkgoT(), cm, "expected a configmap but none returned")
+	return cm
+}
+
+// EnsureConfigMap creates or updates an existing ConfigMap object or returns it.
+func (f *Framework) EnsureConfigMap(configMap *core.ConfigMap) *core.ConfigMap {
+	cm := configMap.DeepCopy()
+	// Clean out ResourceVersion field if present
+	if cm.ObjectMeta.ResourceVersion != "" {
+		cm.ObjectMeta.ResourceVersion = ""
 	}
 
-	return cm, nil
+	res, err := f.KubeClientSet.CoreV1().ConfigMaps(configMap.Namespace).Create(context.TODO(), cm, metav1.CreateOptions{})
+	if k8sErrors.IsAlreadyExists(err) {
+		res, err = f.KubeClientSet.CoreV1().ConfigMaps(configMap.Namespace).Update(context.TODO(), cm, metav1.UpdateOptions{})
+	}
+	assert.Nil(ginkgo.GinkgoT(), err, "updating configmap")
+	assert.NotNil(ginkgo.GinkgoT(), res, "updating configmap")
+
+	return res
 }
 
 // GetIngress gets an Ingress object from the given namespace, name and returns it, throws error if it does not exists.
@@ -72,13 +83,13 @@ func (f *Framework) GetIngress(namespace string, name string) *networking.Ingres
 // EnsureIngress creates an Ingress object and returns it, throws error if it already exists.
 func (f *Framework) EnsureIngress(ingress *networking.Ingress) *networking.Ingress {
 	fn := func() {
-		err := createIngressWithRetries(f.KubeClientSet, f.Namespace, ingress)
+		err := createIngressWithRetries(f.KubeClientSet, ingress.Namespace, ingress)
 		assert.Nil(ginkgo.GinkgoT(), err, "creating ingress")
 	}
 
 	f.WaitForReload(fn)
 
-	ing := f.GetIngress(f.Namespace, ingress.Name)
+	ing := f.GetIngress(ingress.Namespace, ingress.Name)
 	if ing.Annotations == nil {
 		ing.Annotations = make(map[string]string)
 	}
@@ -88,10 +99,10 @@ func (f *Framework) EnsureIngress(ingress *networking.Ingress) *networking.Ingre
 
 // UpdateIngress updates an Ingress object and returns the updated object.
 func (f *Framework) UpdateIngress(ingress *networking.Ingress) *networking.Ingress {
-	err := updateIngressWithRetries(f.KubeClientSet, f.Namespace, ingress)
+	err := updateIngressWithRetries(f.KubeClientSet, ingress.Namespace, ingress)
 	assert.Nil(ginkgo.GinkgoT(), err, "updating ingress")
 
-	ing := f.GetIngress(f.Namespace, ingress.Name)
+	ing := f.GetIngress(ingress.Namespace, ingress.Name)
 	if ing.Annotations == nil {
 		ing.Annotations = make(map[string]string)
 	}
@@ -113,15 +124,15 @@ func (f *Framework) GetService(namespace string, name string) *core.Service {
 
 // EnsureService creates a Service object and returns it, throws error if it already exists.
 func (f *Framework) EnsureService(service *core.Service) *core.Service {
-	err := createServiceWithRetries(f.KubeClientSet, f.Namespace, service)
+	err := createServiceWithRetries(f.KubeClientSet, service.Namespace, service)
 	assert.Nil(ginkgo.GinkgoT(), err, "creating service")
 
-	return f.GetService(f.Namespace, service.Name)
+	return f.GetService(service.Namespace, service.Name)
 }
 
 // EnsureDeployment creates a Deployment object and returns it, throws error if it already exists.
 func (f *Framework) EnsureDeployment(deployment *appsv1.Deployment) *appsv1.Deployment {
-	err := createDeploymentWithRetries(f.KubeClientSet, f.Namespace, deployment)
+	err := createDeploymentWithRetries(f.KubeClientSet, deployment.Namespace, deployment)
 	assert.Nil(ginkgo.GinkgoT(), err, "creating deployment")
 
 	d, err := f.KubeClientSet.AppsV1().Deployments(deployment.Namespace).Get(context.TODO(), deployment.Name, metav1.GetOptions{})
@@ -293,7 +304,7 @@ func createDeploymentWithRetries(c kubernetes.Interface, namespace string, obj *
 	return retryWithExponentialBackOff(createFunc)
 }
 
-func createSecretWithRetries(c kubernetes.Interface, namespace string, obj *v1.Secret) error {
+func createSecretWithRetries(c kubernetes.Interface, namespace string, obj *core.Secret) error {
 	if obj == nil {
 		return fmt.Errorf("Object provided to create is empty")
 	}
@@ -313,7 +324,7 @@ func createSecretWithRetries(c kubernetes.Interface, namespace string, obj *v1.S
 	return retryWithExponentialBackOff(createFunc)
 }
 
-func createServiceWithRetries(c kubernetes.Interface, namespace string, obj *v1.Service) error {
+func createServiceWithRetries(c kubernetes.Interface, namespace string, obj *core.Service) error {
 	if obj == nil {
 		return fmt.Errorf("Object provided to create is empty")
 	}

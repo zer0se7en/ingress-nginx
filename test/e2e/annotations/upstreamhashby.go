@@ -22,7 +22,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -77,7 +77,7 @@ var _ = framework.DescribeAnnotation("upstream-hash-by-*", func() {
 	f := framework.NewDefaultFramework("upstream-hash-by")
 
 	ginkgo.BeforeEach(func() {
-		f.NewEchoDeploymentWithReplicas(6)
+		f.NewEchoDeployment(framework.WithDeploymentReplicas(6))
 	})
 
 	ginkgo.It("should connect to the same pod", func() {

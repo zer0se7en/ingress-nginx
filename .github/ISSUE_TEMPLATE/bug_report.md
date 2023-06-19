@@ -10,7 +10,8 @@ assignees: ''
 <!--
 
 Welcome to ingress-nginx!  For a smooth issue process, try to answer the following questions.
-Don't worry if they're not all applicable; just try to include what you can :-)
+Don't worry if they're not all applicable; just try to include what you can :-).
+More info helps better understanding of the issue (needless to say).
 
 If you need to include code snippets or logs, please put them in fenced code
 blocks.  If they're super-long, please use the details tag like
@@ -26,6 +27,15 @@ Please complete the next sections or the issue will be closed.
 This questions are the first thing we need to know to understand the context.
 
 -->
+
+**What happened**:
+
+<!-- (please include exact error messages if you can) -->
+
+**What you expected to happen**:
+
+<!-- What do you think went wrong? -->
+
 
 **NGINX Ingress controller version** (exec into the pod and run nginx-ingress-controller --version.):
 <!--
@@ -43,18 +53,19 @@ kubectl exec -it $POD_NAME -n $POD_NAMESPACE -- /nginx-ingress-controller --vers
 - **OS** (e.g. from /etc/os-release):
 - **Kernel** (e.g. `uname -a`):
 - **Install tools**:
-  - `Please mention how/where was clsuter created like kubeadm/kops/minikube/kind etc. `
+  - `Please mention how/where was the cluster created like kubeadm/kops/minikube/kind etc. `
 - **Basic cluster related info**:
   - `kubectl version`
   - `kubectl get nodes -o wide`
 
 - **How was the ingress-nginx-controller installed**:
-  - If helm was used then please show output of `helm ls -A`
+  - If helm was used then please show output of `helm ls -A | grep -i ingress`
   - If helm was used then please show output of `helm -n <ingresscontrollernamepspace> get values <helmreleasename>`
-  - If helm was not used, then please explain how the ingress-nginx-controller was installed or copy/paste the command used to install the controller below
+  - If helm was not used, then copy/paste the complete precise command used to install the controller, along with the flags and options used
   - if you have more than one instance of the ingress-nginx-controller installed in the same cluster, please provide details for all the instances
 
 - **Current State of the controller**:
+  - `kubectl describe ingressclasses`
   - `kubectl -n <ingresscontrollernamespace> get all -A -o wide`
   - `kubectl -n <ingresscontrollernamespace> describe po <ingresscontrollerpodname>`
   - `kubectl -n <ingresscontrollernamespace> describe svc <ingresscontrollerservicename>`
@@ -70,15 +81,8 @@ kubectl exec -it $POD_NAME -n $POD_NAMESPACE -- /nginx-ingress-controller --vers
     - `kubectl describe ...` of any custom configmap(s) created and in use
     - Any other related information that may help
 
-**What happened**:
 
-<!-- (please include exact error messages if you can) -->
-
-**What you expected to happen**:
-
-<!-- What do you think went wrong? -->
-
-**How to reproduce it**:
+**How to reproduce this issue**:
 <!---
 
 As minimally and precisely as possible. Keep in mind we do not have access to your cluster or application.
@@ -100,19 +104,25 @@ kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main
 ## Create an ingress (please add any additional annotation required)
 
 echo "
-  apiVersion: networking.k8s.io/v1beta1
+  apiVersion: networking.k8s.io/v1
   kind: Ingress
   metadata:
     name: foo-bar
+    annotations:
+      kubernetes.io/ingress.class: nginx
   spec:
+    ingressClassName: nginx # omit this if you're on controller version below 1.0.0
     rules:
     - host: foo.bar
       http:
         paths:
-        - backend:
-            serviceName: http-svc
-            servicePort: 80
-          path: /
+        - path: /
+          pathType: Prefix
+          backend:
+            service:
+              name: http-svc
+              port: 
+                number: 80
 " | kubectl apply -f -
 
 ## make a request
@@ -124,6 +134,9 @@ kubectl exec -it -n ingress-nginx $POD_NAME -- curl -H 'Host: foo.bar' localhost
 
 **Anything else we need to know**:
 
-<!-- If this is actually about documentation, add `/kind documentation` below -->
+<!-- If this is actually about documentation, uncomment the following block -->
 
-/kind bug
+<!-- 
+/kind documentation
+/remove-kind bug
+-->

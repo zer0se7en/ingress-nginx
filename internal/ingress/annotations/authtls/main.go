@@ -17,7 +17,8 @@ limitations under the License.
 package authtls
 
 import (
-	"github.com/pkg/errors"
+	"fmt"
+
 	networking "k8s.io/api/networking/v1"
 
 	"regexp"
@@ -35,6 +36,7 @@ const (
 
 var (
 	authVerifyClientRegex = regexp.MustCompile(`on|off|optional|optional_no_ca`)
+	commonNameRegex       = regexp.MustCompile(`CN=`)
 )
 
 // Config contains the AuthSSLCert used for mutual authentication
@@ -45,6 +47,7 @@ type Config struct {
 	ValidationDepth    int    `json:"validationDepth"`
 	ErrorPage          string `json:"errorPage"`
 	PassCertToUpstream bool   `json:"passCertToUpstream"`
+	MatchCN            string `json:"matchCN"`
 	AuthTLSError       string
 }
 
@@ -102,7 +105,7 @@ func (a authTLS) Parse(ing *networking.Ingress) (interface{}, error) {
 
 	authCert, err := a.r.GetAuthCertificate(tlsauthsecret)
 	if err != nil {
-		e := errors.Wrap(err, "error obtaining certificate")
+		e := fmt.Errorf("error obtaining certificate: %w", err)
 		return &Config{}, ing_errors.LocationDenied{Reason: e}
 	}
 	config.AuthSSLCert = *authCert
@@ -125,6 +128,11 @@ func (a authTLS) Parse(ing *networking.Ingress) (interface{}, error) {
 	config.PassCertToUpstream, err = parser.GetBoolAnnotation("auth-tls-pass-certificate-to-upstream", ing)
 	if err != nil {
 		config.PassCertToUpstream = false
+	}
+
+	config.MatchCN, err = parser.GetStringAnnotation("auth-tls-match-cn", ing)
+	if err != nil || !commonNameRegex.MatchString(config.MatchCN) {
+		config.MatchCN = ""
 	}
 
 	return config, nil

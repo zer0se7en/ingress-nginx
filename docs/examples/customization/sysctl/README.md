@@ -1,9 +1,9 @@
 # Sysctl tuning
 
-This example aims to demonstrate the use of an Init Container to adjust sysctl default values using `kubectl patch`
+This example aims to demonstrate the use of an Init Container to adjust sysctl default values using `kubectl patch`.
 
 ```console
-kubectl patch deployment -n ingress-nginx nginx-ingress-controller \
+kubectl patch deployment -n ingress-nginx ingress-nginx-controller \
     --patch="$(curl https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/docs/examples/customization/sysctl/patch.json)"
 ```
 

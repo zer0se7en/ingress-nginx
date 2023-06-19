@@ -17,11 +17,10 @@ limitations under the License.
 package settings
 
 import (
-	"fmt"
 	"regexp"
 	"strings"
 
-	"github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/v2"
 	"k8s.io/ingress-nginx/test/e2e/framework"
 )
 
@@ -41,7 +40,7 @@ var _ = framework.DescribeSetting("keep-alive keep-alive-requests", func() {
 			f.UpdateNginxConfigMapData("keep-alive", "140")
 
 			f.WaitForNginxConfiguration(func(server string) bool {
-				return strings.Contains(server, fmt.Sprintf(`keepalive_timeout 140s;`))
+				return strings.Contains(server, `keepalive_timeout 140s;`)
 			})
 		})
 
@@ -49,7 +48,7 @@ var _ = framework.DescribeSetting("keep-alive keep-alive-requests", func() {
 			f.UpdateNginxConfigMapData("keep-alive-requests", "200")
 
 			f.WaitForNginxConfiguration(func(server string) bool {
-				return strings.Contains(server, fmt.Sprintf(`keepalive_requests 200;`))
+				return strings.Contains(server, `keepalive_requests 200;`)
 			})
 
 		})
@@ -70,6 +69,15 @@ var _ = framework.DescribeSetting("keep-alive keep-alive-requests", func() {
 
 			f.WaitForNginxConfiguration(func(server string) bool {
 				match, _ := regexp.MatchString(`upstream\supstream_balancer\s\{[\s\S]*keepalive_timeout\s*120s;`, server)
+				return match
+			})
+		})
+
+		ginkgo.It("should set keepalive time to upstream server", func() {
+			f.UpdateNginxConfigMapData("upstream-keepalive-time", "75s")
+
+			f.WaitForNginxConfiguration(func(server string) bool {
+				match, _ := regexp.MatchString(`upstream\supstream_balancer\s\{[\s\S]*keepalive_time\s*75s;`, server)
 				return match
 			})
 		})

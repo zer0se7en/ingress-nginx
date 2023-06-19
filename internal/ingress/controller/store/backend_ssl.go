@@ -20,16 +20,17 @@ import (
 	"fmt"
 	"strings"
 
-	"k8s.io/klog/v2"
-
-	"github.com/pkg/errors"
 	apiv1 "k8s.io/api/core/v1"
 	networking "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"k8s.io/ingress-nginx/internal/file"
-	"k8s.io/ingress-nginx/internal/ingress"
+	"k8s.io/ingress-nginx/pkg/apis/ingress"
+
+	klog "k8s.io/klog/v2"
+
 	"k8s.io/ingress-nginx/internal/net/ssl"
+
+	"k8s.io/ingress-nginx/pkg/util/file"
 )
 
 // syncSecret synchronizes the content of a TLS Secret (certificate(s), secret
@@ -154,6 +155,8 @@ func (s *k8sStore) getPemCertificate(secretName string) (*ingress.SSLCert, error
 			return nil, fmt.Errorf("error configuring CA certificate: %v", err)
 		}
 
+		sslCert.CASHA = file.SHA1(sslCert.CAFileName)
+
 		if len(crl) > 0 {
 			err = ssl.ConfigureCRL(nsSecName, crl, sslCert)
 			if err != nil {
@@ -178,7 +181,7 @@ func (s *k8sStore) getPemCertificate(secretName string) (*ingress.SSLCert, error
 	if secretName == s.defaultSSLCertificate {
 		path, err := ssl.StoreSSLCertOnDisk(nsSecName, sslCert)
 		if err != nil {
-			return nil, errors.Wrap(err, "storing default SSL Certificate")
+			return nil, fmt.Errorf("storing default SSL Certificate: %w", err)
 		}
 
 		sslCert.PemFileName = path

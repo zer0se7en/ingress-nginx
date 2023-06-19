@@ -36,7 +36,7 @@ spec:
     spec:
       containers:
       - name: nginx-error-server
-        image: k8s.gcr.io/ingress-nginx/nginx-errors:0.48.1
+        image: registry.k8s.io/ingress-nginx/nginx-errors:v20230505@sha256:3600dcd1bbd0d05959bb01af4b272714e94d22d24a64e91838e7183c80e53f7f
         ports:
         - containerPort: 8080
         # Setting the environment variable DEBUG we can see the headers sent 
@@ -44,3 +44,19 @@ spec:
         # env:
         # - name: DEBUG
         #   value: "true"
+
+        # Mounting custom error page from configMap
+        # volumeMounts:
+        # - name: custom_error_pages
+        #   mountPath: /www
+
+      # Mounting custom error page from configMap
+      # volumes:
+      # - name: custom_error_pages
+      #   configMap:
+      #     name: custom_error_pages
+      #     items:
+      #     - key: "404"
+      #       path: "404.html"
+      #     - key: "503"
+      #       path: "503.html"

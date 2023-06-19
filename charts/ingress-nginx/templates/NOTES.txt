@@ -29,23 +29,31 @@ Get the application URL by running these commands:
 
 An example Ingress that makes use of the controller:
 
+{{- $isV1 := semverCompare ">=1" .Chart.AppVersion}}
   apiVersion: networking.k8s.io/v1
   kind: Ingress
   metadata:
     name: example
     namespace: foo
+    {{- if eq $isV1 false }}
+    annotations:
+      kubernetes.io/ingress.class: {{ .Values.controller.ingressClass }}
+    {{- end }}
   spec:
-    ingressClassName: example-class
+    {{- if $isV1 }}
+    ingressClassName: {{ .Values.controller.ingressClassResource.name }}
+    {{- end }}
     rules:
       - host: www.example.com
         http:
           paths:
-            - path: /
-              pathType: Prefix
+            - pathType: Prefix
               backend:
                 service:
                   name: exampleService
-                  port: 80
+                  port:
+                    number: 80
+              path: /
     # This section is only required if TLS is to be enabled for the Ingress
     tls:
       - hosts:
@@ -63,10 +71,3 @@ If TLS is enabled for the Ingress, a Secret containing the certificate and key m
     tls.crt: <base64 encoded cert>
     tls.key: <base64 encoded key>
   type: kubernetes.io/tls
-
-{{- if .Values.controller.headers }}
-#################################################################################
-######   WARNING: `controller.headers` has been deprecated!                 #####
-######            It has been renamed to `controller.proxySetHeaders`.      #####
-#################################################################################
-{{- end }}

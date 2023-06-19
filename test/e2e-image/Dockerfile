@@ -1,14 +1,16 @@
-FROM k8s.gcr.io/ingress-nginx/e2e-test-runner:v20210916-gd9f96bbbb@sha256:5b434c08e582b58b96867152682c1e754ee609c82390abf3074992d4ec53ed25 AS BASE
+ARG E2E_BASE_IMAGE
+FROM ${E2E_BASE_IMAGE} AS BASE
 
-FROM alpine:3.12
+FROM alpine:3.18.0
 
-RUN apk add -U --no-cache \
-    ca-certificates \
-    bash \
-    curl \
-    tzdata \
-    libc6-compat \
-    openssl
+RUN apk update \
+	&& apk upgrade && apk add -U --no-cache \
+  ca-certificates \
+  bash \
+  curl \
+  tzdata \
+  libc6-compat \
+  openssl
 
 COPY --from=BASE /go/bin/ginkgo /usr/local/bin/
 COPY --from=BASE /usr/local/bin/helm /usr/local/bin/

@@ -18,7 +18,7 @@ package metric
 
 import (
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/ingress-nginx/internal/ingress"
+	"k8s.io/ingress-nginx/pkg/apis/ingress"
 )
 
 // NewDummyCollector returns a dummy metric collector
@@ -32,11 +32,20 @@ type DummyCollector struct{}
 // ConfigSuccess ...
 func (dc DummyCollector) ConfigSuccess(uint64, bool) {}
 
+// SetAdmissionMetrics ...
+func (dc DummyCollector) SetAdmissionMetrics(float64, float64, float64, float64, float64, float64) {}
+
 // IncReloadCount ...
 func (dc DummyCollector) IncReloadCount() {}
 
 // IncReloadErrorCount ...
 func (dc DummyCollector) IncReloadErrorCount() {}
+
+// IncOrphanIngress ...
+func (dc DummyCollector) IncOrphanIngress(string, string, string) {}
+
+// DecOrphanIngress ...
+func (dc DummyCollector) DecOrphanIngress(string, string, string) {}
 
 // IncCheckCount ...
 func (dc DummyCollector) IncCheckCount(string, string) {}
@@ -45,19 +54,22 @@ func (dc DummyCollector) IncCheckCount(string, string) {}
 func (dc DummyCollector) IncCheckErrorCount(string, string) {}
 
 // RemoveMetrics ...
-func (dc DummyCollector) RemoveMetrics(ingresses, endpoints []string) {}
+func (dc DummyCollector) RemoveMetrics(ingresses, endpoints, certificates []string) {}
 
 // Start ...
-func (dc DummyCollector) Start() {}
+func (dc DummyCollector) Start(admissionStatus string) {}
 
 // Stop ...
-func (dc DummyCollector) Stop() {}
+func (dc DummyCollector) Stop(admissionStatus string) {}
+
+// SetSSLInfo ...
+func (dc DummyCollector) SetSSLInfo([]*ingress.Server) {}
 
 // SetSSLExpireTime ...
 func (dc DummyCollector) SetSSLExpireTime([]*ingress.Server) {}
 
 // SetHosts ...
-func (dc DummyCollector) SetHosts(hosts sets.String) {}
+func (dc DummyCollector) SetHosts(hosts sets.Set[string]) {}
 
 // OnStartedLeading indicates the pod is not the current leader
 func (dc DummyCollector) OnStartedLeading(electionID string) {}

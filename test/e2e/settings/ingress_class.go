@@ -23,7 +23,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 	appsv1 "k8s.io/api/apps/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -45,7 +45,7 @@ var _ = framework.IngressNginxDescribe("[Flag] ingress-class", func() {
 	otherController := "k8s.io/other-class"
 
 	ginkgo.BeforeEach(func() {
-		f.NewEchoDeploymentWithReplicas(1)
+		f.NewEchoDeployment(framework.WithDeploymentReplicas(1))
 
 		doOnce.Do(func() {
 			_, err := f.KubeClientSet.NetworkingV1().IngressClasses().

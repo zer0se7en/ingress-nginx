@@ -17,12 +17,11 @@ limitations under the License.
 package auth
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"testing"
 	"time"
-
-	"github.com/pkg/errors"
 
 	api "k8s.io/api/core/v1"
 	networking "k8s.io/api/networking/v1"
@@ -81,7 +80,7 @@ type mockSecret struct {
 
 func (m mockSecret) GetSecret(name string) (*api.Secret, error) {
 	if name != "default/demo-secret" {
-		return nil, errors.Errorf("there is no secret with name %v", name)
+		return nil, fmt.Errorf("there is no secret with name %v", name)
 	}
 
 	return &api.Secret{

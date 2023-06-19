@@ -23,16 +23,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mitchellh/hashstructure"
+	"github.com/mitchellh/hashstructure/v2"
 	apiv1 "k8s.io/api/core/v1"
 	networking "k8s.io/api/networking/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
-	"k8s.io/ingress-nginx/internal/ingress"
 	"k8s.io/ingress-nginx/internal/ingress/annotations"
+	"k8s.io/ingress-nginx/internal/ingress/annotations/canary"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/log"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/parser"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/proxy"
@@ -40,15 +41,22 @@ import (
 	"k8s.io/ingress-nginx/internal/ingress/controller/ingressclass"
 	"k8s.io/ingress-nginx/internal/ingress/controller/store"
 	"k8s.io/ingress-nginx/internal/ingress/errors"
+	"k8s.io/ingress-nginx/internal/ingress/inspector"
+	"k8s.io/ingress-nginx/internal/ingress/metric/collectors"
 	"k8s.io/ingress-nginx/internal/k8s"
 	"k8s.io/ingress-nginx/internal/nginx"
+	"k8s.io/ingress-nginx/pkg/apis/ingress"
+	utilingress "k8s.io/ingress-nginx/pkg/util/ingress"
 	"k8s.io/klog/v2"
 )
 
 const (
-	defUpstreamName = "upstream-default-backend"
-	defServerName   = "_"
-	rootLocation    = "/"
+	defUpstreamName             = "upstream-default-backend"
+	defServerName               = "_"
+	rootLocation                = "/"
+	emptyZone                   = ""
+	orphanMetricLabelNoService  = "no-service"
+	orphanMetricLabelNoEndpoint = "no-endpoint"
 )
 
 // Configuration contains all the settings required by an Ingress controller
@@ -66,6 +74,8 @@ type Configuration struct {
 	DefaultService string
 
 	Namespace string
+
+	WatchNamespaceSelector labels.Selector
 
 	// +optional
 	TCPConfigMapName string
@@ -92,8 +102,11 @@ type Configuration struct {
 
 	EnableProfiling bool
 
-	EnableMetrics  bool
-	MetricsPerHost bool
+	EnableMetrics        bool
+	MetricsPerHost       bool
+	MetricsBuckets       *collectors.HistogramBuckets
+	ReportStatusClasses  bool
+	ExcludeSocketMetrics []string
 
 	FakeCertificate *ingress.SSLCert
 
@@ -113,7 +126,31 @@ type Configuration struct {
 
 	MonitorMaxBatchSize int
 
-	ShutdownGracePeriod int
+	PostShutdownGracePeriod int
+	ShutdownGracePeriod     int
+
+	InternalLoggerAddress string
+	IsChroot              bool
+	DeepInspector         bool
+
+	DynamicConfigurationRetries int
+
+	DisableSyncEvents bool
+
+	EnableTopologyAwareRouting bool
+}
+
+func getIngressPodZone(svc *apiv1.Service) string {
+	svcKey := k8s.MetaNamespaceKey(svc)
+	if svcZoneAnnotation, ok := svc.ObjectMeta.GetAnnotations()[apiv1.AnnotationTopologyAwareHints]; ok {
+		if strings.ToLower(svcZoneAnnotation) == "auto" {
+			if foundZone, ok := k8s.IngressNodeDetails.GetLabels()[apiv1.LabelTopologyZone]; ok {
+				klog.V(3).Infof("Svc has topology aware annotation enabled, try to use zone %q where controller pod is running for Service %q ", foundZone, svcKey)
+				return foundZone
+			}
+		}
+	}
+	return emptyZone
 }
 
 // GetPublishService returns the Service used to set the load-balancer status of Ingresses.
@@ -140,6 +177,7 @@ func (n *NGINXController) syncIngress(interface{}) error {
 	hosts, servers, pcfg := n.getConfiguration(ings)
 
 	n.metricCollector.SetSSLExpireTime(servers)
+	n.metricCollector.SetSSLInfo(servers)
 
 	if n.runningConfig.Equal(pcfg) {
 		klog.V(3).Infof("No configuration change detected, skipping backend reload")
@@ -148,10 +186,10 @@ func (n *NGINXController) syncIngress(interface{}) error {
 
 	n.metricCollector.SetHosts(hosts)
 
-	if !n.IsDynamicConfigurationEnough(pcfg) {
+	if !utilingress.IsDynamicConfigurationEnough(pcfg, n.runningConfig) {
 		klog.InfoS("Configuration changes detected, backend reload required")
 
-		hash, _ := hashstructure.Hash(pcfg, &hashstructure.HashOptions{
+		hash, _ := hashstructure.Hash(pcfg, hashstructure.FormatV1, &hashstructure.HashOptions{
 			TagName: "json",
 		})
 
@@ -182,19 +220,24 @@ func (n *NGINXController) syncIngress(interface{}) error {
 	}
 
 	retry := wait.Backoff{
-		Steps:    15,
-		Duration: 1 * time.Second,
-		Factor:   0.8,
+		Steps:    1 + n.cfg.DynamicConfigurationRetries,
+		Duration: time.Second,
+		Factor:   1.3,
 		Jitter:   0.1,
 	}
 
+	retriesRemaining := retry.Steps
 	err := wait.ExponentialBackoff(retry, func() (bool, error) {
 		err := n.configureDynamically(pcfg)
 		if err == nil {
 			klog.V(2).Infof("Dynamic reconfiguration succeeded.")
 			return true, nil
 		}
-
+		retriesRemaining--
+		if retriesRemaining > 0 {
+			klog.Warningf("Dynamic reconfiguration failed (retrying; %d retries left): %v", retriesRemaining, err)
+			return false, nil
+		}
 		klog.Warningf("Dynamic reconfiguration failed: %v", err)
 		return false, err
 	})
@@ -203,18 +246,67 @@ func (n *NGINXController) syncIngress(interface{}) error {
 		return err
 	}
 
-	ri := getRemovedIngresses(n.runningConfig, pcfg)
-	re := getRemovedHosts(n.runningConfig, pcfg)
-	n.metricCollector.RemoveMetrics(ri, re)
+	ri := utilingress.GetRemovedIngresses(n.runningConfig, pcfg)
+	re := utilingress.GetRemovedHosts(n.runningConfig, pcfg)
+	rc := utilingress.GetRemovedCertificateSerialNumbers(n.runningConfig, pcfg)
+	n.metricCollector.RemoveMetrics(ri, re, rc)
 
 	n.runningConfig = pcfg
 
 	return nil
 }
 
+// GetWarnings returns a list of warnings an Ingress gets when being created.
+// The warnings are going to be used in an admission webhook, and they represent
+// a list of messages that users need to be aware (like deprecation notices)
+// when creating a new ingress object
+func (n *NGINXController) CheckWarning(ing *networking.Ingress) ([]string, error) {
+	warnings := make([]string, 0)
+
+	var deprecatedAnnotations = sets.NewString()
+	deprecatedAnnotations.Insert(
+		"enable-influxdb",
+		"influxdb-measurement",
+		"influxdb-port",
+		"influxdb-host",
+		"influxdb-server-name",
+		"secure-verify-ca-secret",
+	)
+
+	// Skip checks if the ingress is marked as deleted
+	if !ing.DeletionTimestamp.IsZero() {
+		return warnings, nil
+	}
+
+	anns := ing.GetAnnotations()
+	for k := range anns {
+		trimmedkey := strings.TrimPrefix(k, parser.AnnotationsPrefix+"/")
+		if deprecatedAnnotations.Has(trimmedkey) {
+			warnings = append(warnings, fmt.Sprintf("annotation %s is deprecated", k))
+		}
+	}
+
+	// Add each validation as a single warning
+	// rikatz: I know this is somehow a duplicated code from CheckIngress, but my goal was to deliver fast warning on this behavior. We
+	// can and should, tho, simplify this in the near future
+	if err := inspector.ValidatePathType(ing); err != nil {
+		if errs, is := err.(interface{ Unwrap() []error }); is {
+			for _, errW := range errs.Unwrap() {
+				warnings = append(warnings, errW.Error())
+			}
+		} else {
+			warnings = append(warnings, err.Error())
+		}
+	}
+
+	return warnings, nil
+}
+
 // CheckIngress returns an error in case the provided ingress, when added
 // to the current configuration, generates an invalid configuration
 func (n *NGINXController) CheckIngress(ing *networking.Ingress) error {
+	startCheck := time.Now().UnixNano() / 1000000
+
 	if ing == nil {
 		// no ingress to add, no state change
 		return nil
@@ -225,22 +317,56 @@ func (n *NGINXController) CheckIngress(ing *networking.Ingress) error {
 		return nil
 	}
 
+	if n.cfg.DeepInspector {
+		if err := inspector.DeepInspect(ing); err != nil {
+			return fmt.Errorf("invalid object: %w", err)
+		}
+	}
+
+	// Do not attempt to validate an ingress that's not meant to be controlled by the current instance of the controller.
+	if ingressClass, err := n.store.GetIngressClass(ing, n.cfg.IngressClassConfiguration); ingressClass == "" {
+		klog.Warningf("ignoring ingress %v in %v based on annotation %v: %v", ing.Name, ing.ObjectMeta.Namespace, ingressClass, err)
+		return nil
+	}
+
 	if n.cfg.Namespace != "" && ing.ObjectMeta.Namespace != n.cfg.Namespace {
 		klog.Warningf("ignoring ingress %v in namespace %v different from the namespace watched %s", ing.Name, ing.ObjectMeta.Namespace, n.cfg.Namespace)
 		return nil
 	}
 
 	if n.cfg.DisableCatchAll && ing.Spec.DefaultBackend != nil {
-		return fmt.Errorf("This deployment is trying to create a catch-all ingress while DisableCatchAll flag is set to true. Remove '.spec.backend' or set DisableCatchAll flag to false.")
+		return fmt.Errorf("This deployment is trying to create a catch-all ingress while DisableCatchAll flag is set to true. Remove '.spec.defaultBackend' or set DisableCatchAll flag to false.")
 	}
-
+	startRender := time.Now().UnixNano() / 1000000
 	cfg := n.store.GetBackendConfiguration()
 	cfg.Resolver = n.resolver
 
-	for key := range ing.ObjectMeta.GetAnnotations() {
+	// Adds the pathType Validation
+	if cfg.StrictValidatePathType {
+		if err := inspector.ValidatePathType(ing); err != nil {
+			return fmt.Errorf("ingress contains invalid paths: %w", err)
+		}
+	}
+
+	var arrayBadWords []string
+
+	if cfg.AnnotationValueWordBlocklist != "" {
+		arrayBadWords = strings.Split(strings.TrimSpace(cfg.AnnotationValueWordBlocklist), ",")
+	}
+
+	for key, value := range ing.ObjectMeta.GetAnnotations() {
+
 		if parser.AnnotationsPrefix != parser.DefaultAnnotationsPrefix {
 			if strings.HasPrefix(key, fmt.Sprintf("%s/", parser.DefaultAnnotationsPrefix)) {
 				return fmt.Errorf("This deployment has a custom annotation prefix defined. Use '%s' instead of '%s'", parser.AnnotationsPrefix, parser.DefaultAnnotationsPrefix)
+			}
+		}
+
+		if strings.HasPrefix(key, fmt.Sprintf("%s/", parser.AnnotationsPrefix)) && len(arrayBadWords) != 0 {
+			for _, forbiddenvalue := range arrayBadWords {
+				if strings.Contains(value, strings.TrimSpace(forbiddenvalue)) {
+					return fmt.Errorf("%s annotation contains invalid word %s", key, forbiddenvalue)
+				}
 			}
 		}
 
@@ -267,7 +393,7 @@ func (n *NGINXController) CheckIngress(ing *networking.Ingress) error {
 		Ingress:           *ing,
 		ParsedAnnotations: annotations.NewAnnotationExtractor(n.store).Extract(ing),
 	})
-
+	startTest := time.Now().UnixNano() / 1000000
 	_, servers, pcfg := n.getConfiguration(ings)
 
 	err := checkOverlap(ing, allIngresses, servers)
@@ -275,9 +401,10 @@ func (n *NGINXController) CheckIngress(ing *networking.Ingress) error {
 		n.metricCollector.IncCheckErrorCount(ing.ObjectMeta.Namespace, ing.Name)
 		return err
 	}
-
+	testedSize := len(ings)
 	if n.cfg.DisableFullValidationTest {
 		_, _, pcfg = n.getConfiguration(ings[len(ings)-1:])
+		testedSize = 1
 	}
 
 	content, err := n.generateTemplate(cfg, *pcfg)
@@ -291,8 +418,16 @@ func (n *NGINXController) CheckIngress(ing *networking.Ingress) error {
 		n.metricCollector.IncCheckErrorCount(ing.ObjectMeta.Namespace, ing.Name)
 		return err
 	}
-
 	n.metricCollector.IncCheckCount(ing.ObjectMeta.Namespace, ing.Name)
+	endCheck := time.Now().UnixNano() / 1000000
+	n.metricCollector.SetAdmissionMetrics(
+		float64(testedSize),
+		float64(endCheck-startTest)/1000,
+		float64(len(ings)),
+		float64(startTest-startRender)/1000,
+		float64(len(content)),
+		float64(endCheck-startCheck)/1000,
+	)
 	return nil
 }
 
@@ -369,6 +504,13 @@ func (n *NGINXController) getStreamServices(configmapName string, proto apiv1.Pr
 		var endps []ingress.Endpoint
 		/* #nosec */
 		targetPort, err := strconv.Atoi(svcPort) // #nosec
+		var zone string
+		if n.cfg.EnableTopologyAwareRouting {
+			zone = getIngressPodZone(svc)
+		} else {
+			zone = emptyZone
+		}
+
 		if err != nil {
 			// not a port number, fall back to using port name
 			klog.V(3).Infof("Searching Endpoints with %v port name %q for Service %q", proto, svcPort, nsName)
@@ -376,7 +518,7 @@ func (n *NGINXController) getStreamServices(configmapName string, proto apiv1.Pr
 				sp := svc.Spec.Ports[i]
 				if sp.Name == svcPort {
 					if sp.Protocol == proto {
-						endps = getEndpoints(svc, &sp, proto, n.store.GetServiceEndpoints)
+						endps = getEndpointsFromSlices(svc, &sp, proto, zone, n.store.GetServiceEndpointsSlices)
 						break
 					}
 				}
@@ -387,7 +529,7 @@ func (n *NGINXController) getStreamServices(configmapName string, proto apiv1.Pr
 				sp := svc.Spec.Ports[i]
 				if sp.Port == int32(targetPort) {
 					if sp.Protocol == proto {
-						endps = getEndpoints(svc, &sp, proto, n.store.GetServiceEndpoints)
+						endps = getEndpointsFromSlices(svc, &sp, proto, zone, n.store.GetServiceEndpointsSlices)
 						break
 					}
 				}
@@ -438,8 +580,13 @@ func (n *NGINXController) getDefaultUpstream() *ingress.Backend {
 		upstream.Endpoints = append(upstream.Endpoints, n.DefaultEndpoint())
 		return upstream
 	}
-
-	endps := getEndpoints(svc, &svc.Spec.Ports[0], apiv1.ProtocolTCP, n.store.GetServiceEndpoints)
+	var zone string
+	if n.cfg.EnableTopologyAwareRouting {
+		zone = getIngressPodZone(svc)
+	} else {
+		zone = emptyZone
+	}
+	endps := getEndpointsFromSlices(svc, &svc.Spec.Ports[0], apiv1.ProtocolTCP, zone, n.store.GetServiceEndpointsSlices)
 	if len(endps) == 0 {
 		klog.Warningf("Service %q does not have any active Endpoint", svcKey)
 		endps = []ingress.Endpoint{n.DefaultEndpoint()}
@@ -451,11 +598,11 @@ func (n *NGINXController) getDefaultUpstream() *ingress.Backend {
 }
 
 // getConfiguration returns the configuration matching the standard kubernetes ingress
-func (n *NGINXController) getConfiguration(ingresses []*ingress.Ingress) (sets.String, []*ingress.Server, *ingress.Configuration) {
+func (n *NGINXController) getConfiguration(ingresses []*ingress.Ingress) (sets.Set[string], []*ingress.Server, *ingress.Configuration) {
 	upstreams, servers := n.getBackendServers(ingresses)
 	var passUpstreams []*ingress.SSLPassthroughBackend
 
-	hosts := sets.NewString()
+	hosts := sets.New[string]()
 
 	for _, server := range servers {
 		// If a location is defined by a prefix string that ends with the slash character, and requests are processed by one of
@@ -509,6 +656,7 @@ func (n *NGINXController) getConfiguration(ingresses []*ingress.Ingress) (sets.S
 		PassthroughBackends:   passUpstreams,
 		BackendConfigChecksum: n.store.GetBackendConfiguration().Checksum,
 		DefaultSSLCertificate: n.getDefaultSSLCertificate(),
+		StreamSnippets:        n.getStreamSnippets(ingresses),
 	}
 }
 
@@ -531,6 +679,11 @@ func dropSnippetDirectives(anns *annotations.Ingress, ingKey string) {
 		if anns.ExternalAuth.AuthSnippet != "" {
 			klog.V(3).Infof("Ingress %q tried to use auth-snippet and the annotation is disabled by the admin. Removing the annotation", ingKey)
 			anns.ExternalAuth.AuthSnippet = ""
+		}
+
+		if anns.StreamSnippet != "" {
+			klog.V(3).Infof("Ingress %q tried to use stream-snippet and the annotation is disabled by the admin. Removing the annotation", ingKey)
+			anns.StreamSnippet = ""
 		}
 
 	}
@@ -703,6 +856,7 @@ func (n *NGINXController) getBackendServers(ingresses []*ingress.Ingress) ([]*in
 					ups.SessionAffinity.CookieSessionAffinity.MaxAge = anns.SessionAffinity.Cookie.MaxAge
 					ups.SessionAffinity.CookieSessionAffinity.Secure = anns.SessionAffinity.Cookie.Secure
 					ups.SessionAffinity.CookieSessionAffinity.Path = cookiePath
+					ups.SessionAffinity.CookieSessionAffinity.Domain = anns.SessionAffinity.Cookie.Domain
 					ups.SessionAffinity.CookieSessionAffinity.SameSite = anns.SessionAffinity.Cookie.SameSite
 					ups.SessionAffinity.CookieSessionAffinity.ConditionalSameSiteNone = anns.SessionAffinity.Cookie.ConditionalSameSiteNone
 					ups.SessionAffinity.CookieSessionAffinity.ChangeOnFailure = anns.SessionAffinity.Cookie.ChangeOnFailure
@@ -760,7 +914,13 @@ func (n *NGINXController) getBackendServers(ingresses []*ingress.Ingress) ([]*in
 				}
 
 				sp := location.DefaultBackend.Spec.Ports[0]
-				endps := getEndpoints(location.DefaultBackend, &sp, apiv1.ProtocolTCP, n.store.GetServiceEndpoints)
+				var zone string
+				if n.cfg.EnableTopologyAwareRouting {
+					zone = getIngressPodZone(location.DefaultBackend)
+				} else {
+					zone = emptyZone
+				}
+				endps := getEndpointsFromSlices(location.DefaultBackend, &sp, apiv1.ProtocolTCP, zone, n.store.GetServiceEndpointsSlices)
 				// custom backend is valid only if contains at least one endpoint
 				if len(endps) > 0 {
 					name := fmt.Sprintf("custom-default-backend-%v-%v", location.DefaultBackend.GetNamespace(), location.DefaultBackend.GetName())
@@ -865,13 +1025,7 @@ func (n *NGINXController) createUpstreams(data []*ingress.Ingress, du *ingress.B
 			// configure traffic shaping for canary
 			if anns.Canary.Enabled {
 				upstreams[defBackend].NoServer = true
-				upstreams[defBackend].TrafficShapingPolicy = ingress.TrafficShapingPolicy{
-					Weight:        anns.Canary.Weight,
-					Header:        anns.Canary.Header,
-					HeaderValue:   anns.Canary.HeaderValue,
-					HeaderPattern: anns.Canary.HeaderPattern,
-					Cookie:        anns.Canary.Cookie,
-				}
+				upstreams[defBackend].TrafficShapingPolicy = newTrafficShapingPolicy(anns.Canary)
 			}
 
 			if len(upstreams[defBackend].Endpoints) == 0 {
@@ -936,13 +1090,7 @@ func (n *NGINXController) createUpstreams(data []*ingress.Ingress, du *ingress.B
 				// configure traffic shaping for canary
 				if anns.Canary.Enabled {
 					upstreams[name].NoServer = true
-					upstreams[name].TrafficShapingPolicy = ingress.TrafficShapingPolicy{
-						Weight:        anns.Canary.Weight,
-						Header:        anns.Canary.Header,
-						HeaderValue:   anns.Canary.HeaderValue,
-						HeaderPattern: anns.Canary.HeaderPattern,
-						Cookie:        anns.Canary.Cookie,
-					}
+					upstreams[name].TrafficShapingPolicy = newTrafficShapingPolicy(anns.Canary)
 				}
 
 				if len(upstreams[name].Endpoints) == 0 {
@@ -950,7 +1098,15 @@ func (n *NGINXController) createUpstreams(data []*ingress.Ingress, du *ingress.B
 					endp, err := n.serviceEndpoints(svcKey, port.String())
 					if err != nil {
 						klog.Warningf("Error obtaining Endpoints for Service %q: %v", svcKey, err)
+						n.metricCollector.IncOrphanIngress(ing.Namespace, ing.Name, orphanMetricLabelNoService)
 						continue
+					}
+					n.metricCollector.DecOrphanIngress(ing.Namespace, ing.Name, orphanMetricLabelNoService)
+
+					if len(endp) == 0 {
+						n.metricCollector.IncOrphanIngress(ing.Namespace, ing.Name, orphanMetricLabelNoEndpoint)
+					} else {
+						n.metricCollector.DecOrphanIngress(ing.Namespace, ing.Name, orphanMetricLabelNoEndpoint)
 					}
 					upstreams[name].Endpoints = endp
 				}
@@ -1015,9 +1171,13 @@ func (n *NGINXController) serviceEndpoints(svcKey, backendPort string) ([]ingres
 	if err != nil {
 		return upstreams, err
 	}
-
+	var zone string
+	if n.cfg.EnableTopologyAwareRouting {
+		zone = getIngressPodZone(svc)
+	} else {
+		zone = emptyZone
+	}
 	klog.V(3).Infof("Obtaining ports information for Service %q", svcKey)
-
 	// Ingress with an ExternalName Service and no port defined for that Service
 	if svc.Spec.Type == apiv1.ServiceTypeExternalName {
 		if n.cfg.DisableServiceExternalName {
@@ -1025,7 +1185,7 @@ func (n *NGINXController) serviceEndpoints(svcKey, backendPort string) ([]ingres
 			return upstreams, nil
 		}
 		servicePort := externalNamePorts(backendPort, svc)
-		endps := getEndpoints(svc, servicePort, apiv1.ProtocolTCP, n.store.GetServiceEndpoints)
+		endps := getEndpointsFromSlices(svc, servicePort, apiv1.ProtocolTCP, zone, n.store.GetServiceEndpointsSlices)
 		if len(endps) == 0 {
 			klog.Warningf("Service %q does not have any active Endpoint.", svcKey)
 			return upstreams, nil
@@ -1042,7 +1202,7 @@ func (n *NGINXController) serviceEndpoints(svcKey, backendPort string) ([]ingres
 			servicePort.TargetPort.String() == backendPort ||
 			servicePort.Name == backendPort {
 
-			endps := getEndpoints(svc, &servicePort, apiv1.ProtocolTCP, n.store.GetServiceEndpoints)
+			endps := getEndpointsFromSlices(svc, &servicePort, apiv1.ProtocolTCP, zone, n.store.GetServiceEndpointsSlices)
 			if len(endps) == 0 {
 				klog.Warningf("Service %q does not have any active Endpoint.", svcKey)
 			}
@@ -1143,17 +1303,15 @@ func (n *NGINXController) createServers(data []*ingress.Ingress,
 				// use backend specified in Ingress as the default backend for all its rules
 				un = backendUpstream.Name
 
-				// special "catch all" case, Ingress with a backend but no rule
 				defLoc := servers[defServerName].Locations[0]
-				defLoc.Backend = backendUpstream.Name
-				defLoc.Service = backendUpstream.Service
-				defLoc.Ingress = ing
-
 				if defLoc.IsDefBackend && len(ing.Spec.Rules) == 0 {
 					klog.V(2).Infof("Ingress %q defines a backend but no rule. Using it to configure the catch-all server %q", ingKey, defServerName)
 
 					defLoc.IsDefBackend = false
-
+					// special "catch all" case, Ingress with a backend but no rule
+					defLoc.Backend = backendUpstream.Name
+					defLoc.Service = backendUpstream.Service
+					defLoc.Ingress = ing
 					// TODO: Redirect and rewrite can affect the catch all behavior, skip for now
 					originalRedirect := defLoc.Redirect
 					originalRewrite := defLoc.Rewrite
@@ -1296,7 +1454,10 @@ func (n *NGINXController) createServers(data []*ingress.Ingress,
 
 			servers[host].SSLCert = cert
 
-			if cert.ExpireTime.Before(time.Now().Add(240 * time.Hour)) {
+			now := time.Now()
+			if cert.ExpireTime.Before(now) {
+				klog.Warningf("SSL certificate for server %q expired (%v)", host, cert.ExpireTime)
+			} else if cert.ExpireTime.Before(now.Add(240 * time.Hour)) {
 				klog.Warningf("SSL certificate for server %q is about to expire (%v)", host, cert.ExpireTime)
 			}
 		}
@@ -1339,6 +1500,7 @@ func locationApplyAnnotations(loc *ingress.Location, anns *annotations.Ingress) 
 	loc.EnableGlobalAuth = anns.EnableGlobalAuth
 	loc.HTTP2PushPreload = anns.HTTP2PushPreload
 	loc.Opentracing = anns.Opentracing
+	loc.Opentelemetry = anns.Opentelemetry
 	loc.Proxy = anns.Proxy
 	loc.ProxySSL = anns.ProxySSL
 	loc.RateLimit = anns.RateLimit
@@ -1346,13 +1508,13 @@ func locationApplyAnnotations(loc *ingress.Location, anns *annotations.Ingress) 
 	loc.Redirect = anns.Redirect
 	loc.Rewrite = anns.Rewrite
 	loc.UpstreamVhost = anns.UpstreamVhost
+	loc.Denylist = anns.Denylist
 	loc.Whitelist = anns.Whitelist
 	loc.Denied = anns.Denied
 	loc.XForwardedPrefix = anns.XForwardedPrefix
 	loc.UsePortInRedirects = anns.UsePortInRedirects
 	loc.Connection = anns.Connection
 	loc.Logs = anns.Logs
-	loc.InfluxDB = anns.InfluxDB
 	loc.DefaultBackend = anns.DefaultBackend
 	loc.BackendProtocol = anns.BackendProtocol
 	loc.FastCGI = anns.FastCGI
@@ -1556,60 +1718,6 @@ func extractTLSSecretName(host string, ing *ingress.Ingress,
 	return ""
 }
 
-// getRemovedHosts returns a list of the hostnames
-// that are not associated anymore to the NGINX configuration.
-func getRemovedHosts(rucfg, newcfg *ingress.Configuration) []string {
-	old := sets.NewString()
-	new := sets.NewString()
-
-	for _, s := range rucfg.Servers {
-		if !old.Has(s.Hostname) {
-			old.Insert(s.Hostname)
-		}
-	}
-
-	for _, s := range newcfg.Servers {
-		if !new.Has(s.Hostname) {
-			new.Insert(s.Hostname)
-		}
-	}
-
-	return old.Difference(new).List()
-}
-
-func getRemovedIngresses(rucfg, newcfg *ingress.Configuration) []string {
-	oldIngresses := sets.NewString()
-	newIngresses := sets.NewString()
-
-	for _, server := range rucfg.Servers {
-		for _, location := range server.Locations {
-			if location.Ingress == nil {
-				continue
-			}
-
-			ingKey := k8s.MetaNamespaceKey(location.Ingress)
-			if !oldIngresses.Has(ingKey) {
-				oldIngresses.Insert(ingKey)
-			}
-		}
-	}
-
-	for _, server := range newcfg.Servers {
-		for _, location := range server.Locations {
-			if location.Ingress == nil {
-				continue
-			}
-
-			ingKey := k8s.MetaNamespaceKey(location.Ingress)
-			if !newIngresses.Has(ingKey) {
-				newIngresses.Insert(ingKey)
-			}
-		}
-	}
-
-	return oldIngresses.Difference(newIngresses).List()
-}
-
 // checks conditions for whether or not an upstream should be created for a custom default backend
 func shouldCreateUpstreamForLocationDefaultBackend(upstream *ingress.Backend, location *ingress.Location) bool {
 	return (upstream.Name == location.Backend) &&
@@ -1693,15 +1801,10 @@ func checkOverlap(ing *networking.Ingress, ingresses []*ingress.Ingress, servers
 			}
 
 			// same ingress
-			skipValidation := false
 			for _, existing := range existingIngresses {
 				if existing.ObjectMeta.Namespace == ing.ObjectMeta.Namespace && existing.ObjectMeta.Name == ing.ObjectMeta.Name {
 					return nil
 				}
-			}
-
-			if skipValidation {
-				continue
 			}
 
 			// path overlap. Check if one of the ingresses has a canary annotation
@@ -1748,4 +1851,27 @@ func ingressForHostPath(hostname, path string, servers []*ingress.Server) []*net
 	}
 
 	return ingresses
+}
+
+func (n *NGINXController) getStreamSnippets(ingresses []*ingress.Ingress) []string {
+	snippets := make([]string, 0, len(ingresses))
+	for _, i := range ingresses {
+		if i.ParsedAnnotations.StreamSnippet == "" {
+			continue
+		}
+		snippets = append(snippets, i.ParsedAnnotations.StreamSnippet)
+	}
+	return snippets
+}
+
+// newTrafficShapingPolicy creates new ingress.TrafficShapingPolicy instance using canary configuration
+func newTrafficShapingPolicy(cfg canary.Config) ingress.TrafficShapingPolicy {
+	return ingress.TrafficShapingPolicy{
+		Weight:        cfg.Weight,
+		WeightTotal:   cfg.WeightTotal,
+		Header:        cfg.Header,
+		HeaderValue:   cfg.HeaderValue,
+		HeaderPattern: cfg.HeaderPattern,
+		Cookie:        cfg.Cookie,
+	}
 }

@@ -17,10 +17,9 @@ limitations under the License.
 package ipwhitelist
 
 import (
+	"fmt"
 	"sort"
 	"strings"
-
-	"github.com/pkg/errors"
 
 	networking "k8s.io/api/networking/v1"
 	"k8s.io/ingress-nginx/internal/net"
@@ -28,7 +27,7 @@ import (
 	"k8s.io/ingress-nginx/internal/ingress/annotations/parser"
 	ing_errors "k8s.io/ingress-nginx/internal/ingress/errors"
 	"k8s.io/ingress-nginx/internal/ingress/resolver"
-	"k8s.io/ingress-nginx/internal/sets"
+	"k8s.io/ingress-nginx/pkg/util/sets"
 )
 
 // SourceRange returns the CIDR
@@ -63,19 +62,22 @@ func NewParser(r resolver.Resolver) parser.IngressAnnotation {
 // e.g. `18.0.0.0/8,56.0.0.0/8`
 func (a ipwhitelist) Parse(ing *networking.Ingress) (interface{}, error) {
 	defBackend := a.r.GetDefaultBackend()
-	sort.Strings(defBackend.WhitelistSourceRange)
+
+	defaultWhitelistSourceRange := make([]string, len(defBackend.WhitelistSourceRange))
+	copy(defaultWhitelistSourceRange, defBackend.WhitelistSourceRange)
+	sort.Strings(defaultWhitelistSourceRange)
 
 	val, err := parser.GetStringAnnotation("whitelist-source-range", ing)
 	// A missing annotation is not a problem, just use the default
 	if err == ing_errors.ErrMissingAnnotations {
-		return &SourceRange{CIDR: defBackend.WhitelistSourceRange}, nil
+		return &SourceRange{CIDR: defaultWhitelistSourceRange}, nil
 	}
 
 	values := strings.Split(val, ",")
 	ipnets, ips, err := net.ParseIPNets(values...)
 	if err != nil && len(ips) == 0 {
-		return &SourceRange{CIDR: defBackend.WhitelistSourceRange}, ing_errors.LocationDenied{
-			Reason: errors.Wrap(err, "the annotation does not contain a valid IP address or network"),
+		return &SourceRange{CIDR: defaultWhitelistSourceRange}, ing_errors.LocationDenied{
+			Reason: fmt.Errorf("the annotation does not contain a valid IP address or network: %w", err),
 		}
 	}
 

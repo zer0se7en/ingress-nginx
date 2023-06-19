@@ -24,9 +24,9 @@ import (
 
 	apiv1 "k8s.io/api/core/v1"
 
-	"k8s.io/ingress-nginx/internal/ingress"
 	"k8s.io/ingress-nginx/internal/ingress/defaults"
-	"k8s.io/ingress-nginx/internal/runtime"
+	"k8s.io/ingress-nginx/pkg/apis/ingress"
+	"k8s.io/ingress-nginx/pkg/util/runtime"
 )
 
 var (
@@ -96,6 +96,11 @@ type Configuration struct {
 	// AllowSnippetAnnotations enable users to add their own snippets via ingress annotation.
 	// If disabled, only snippets added via ConfigMap are added to ingress.
 	AllowSnippetAnnotations bool `json:"allow-snippet-annotations"`
+
+	// AnnotationValueWordBlocklist defines words that should not be part of an user annotation value
+	// (can be used to run arbitrary code or configs, for example) and that should be dropped.
+	// This list should be separated by "," character
+	AnnotationValueWordBlocklist string `json:"annotation-value-word-blocklist"`
 
 	// Sets the name of the configmap that contains the headers to pass to the client
 	AddHeaders string `json:"add-headers,omitempty"`
@@ -210,16 +215,19 @@ type Configuration struct {
 
 	// https://nginx.org/en/docs/http/ngx_http_v2_module.html#http2_max_field_size
 	// HTTP2MaxFieldSize Limits the maximum size of an HPACK-compressed request header field
+	// NOTE: Deprecated
 	HTTP2MaxFieldSize string `json:"http2-max-field-size,omitempty"`
 
 	// https://nginx.org/en/docs/http/ngx_http_v2_module.html#http2_max_header_size
 	// HTTP2MaxHeaderSize Limits the maximum size of the entire request header list after HPACK decompression
+	// NOTE: Deprecated
 	HTTP2MaxHeaderSize string `json:"http2-max-header-size,omitempty"`
 
 	// http://nginx.org/en/docs/http/ngx_http_v2_module.html#http2_max_requests
 	// HTTP2MaxRequests Sets the maximum number of requests (including push requests) that can be served
 	// through one HTTP/2 connection, after which the next client request will lead to connection closing
 	// and the need of establishing a new connection.
+	// NOTE: Deprecated
 	HTTP2MaxRequests int `json:"http2-max-requests,omitempty"`
 
 	// http://nginx.org/en/docs/http/ngx_http_v2_module.html#http2_max_concurrent_streams
@@ -257,6 +265,10 @@ type Configuration struct {
 	// http://nginx.org/en/docs/http/ngx_http_core_module.html#large_client_header_buffers
 	// Default: 4 8k
 	LargeClientHeaderBuffers string `json:"large-client-header-buffers"`
+
+	// Disable all escaping
+	// http://nginx.org/en/docs/http/ngx_http_log_module.html#log_format
+	LogFormatEscapeNone bool `json:"log-format-escape-none,omitempty"`
 
 	// Enable json escaping
 	// http://nginx.org/en/docs/http/ngx_http_log_module.html#log_format
@@ -383,6 +395,11 @@ type Configuration struct {
 	// https://www.igvita.com/2013/12/16/optimizing-nginx-tls-time-to-first-byte/
 	SSLBufferSize string `json:"ssl-buffer-size,omitempty"`
 
+	// https://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_reject_handshake
+	// If enabled, SSL handshakes to an invalid virtualhost will be rejected
+	// Default: false
+	SSLRejectHandshake bool `json:"ssl-reject-handshake"`
+
 	// Enables or disables the use of the PROXY protocol to receive client connection
 	// (real IP address) information passed through proxy servers and load balancers
 	// such as HAproxy and Amazon Elastic Load Balancer (ELB).
@@ -413,6 +430,9 @@ type Configuration struct {
 	// Brotli Compression Level that will be used
 	BrotliLevel int `json:"brotli-level,omitempty"`
 
+	// Minimum length of responses, in bytes, that will be eligible for brotli compression
+	BrotliMinLength int `json:"brotli-min-length,omitempty"`
+
 	// MIME Types that will be compressed on-the-fly using Brotli module
 	BrotliTypes string `json:"brotli-types,omitempty"`
 
@@ -420,6 +440,11 @@ type Configuration struct {
 	// http://nginx.org/en/docs/http/ngx_http_v2_module.html
 	// Default: true
 	UseHTTP2 bool `json:"use-http2,omitempty"`
+
+	// Disables gzipping of responses for requests with "User-Agent" header fields matching any of
+	// the specified regular expressions.
+	// http://nginx.org/en/docs/http/ngx_http_gzip_module.html#gzip_disable
+	GzipDisable string `json:"gzip-disable,omitempty"`
 
 	// gzip Compression Level that will be used
 	GzipLevel int `json:"gzip-level,omitempty"`
@@ -454,6 +479,10 @@ type Configuration struct {
 	// number is exceeded, the least recently used connections are closed.
 	// http://nginx.org/en/docs/http/ngx_http_upstream_module.html#keepalive
 	UpstreamKeepaliveConnections int `json:"upstream-keepalive-connections,omitempty"`
+
+	// Sets the maximum time during which requests can be processed through one keepalive connection
+	// https://nginx.org/en/docs/http/ngx_http_upstream_module.html#keepalive_time
+	UpstreamKeepaliveTime string `json:"upstream-keepalive-time,omitempty"`
 
 	// Sets a timeout during which an idle keepalive connection to an upstream server will stay open.
 	// http://nginx.org/en/docs/http/ngx_http_upstream_module.html#keepalive_timeout
@@ -536,6 +565,62 @@ type Configuration struct {
 
 	// OpentracingOperationName specifies a custom name for the location span
 	OpentracingLocationOperationName string `json:"opentracing-location-operation-name"`
+
+	// OpentracingTrustIncomingSpan sets whether or not to trust incoming trace spans
+	// If false, incoming span headers will be rejected
+	// Default: true
+	OpentracingTrustIncomingSpan bool `json:"opentracing-trust-incoming-span"`
+
+	// EnableOpentelemetry enables the nginx Opentelemetry extension
+	// By default this is disabled
+	EnableOpentelemetry bool `json:"enable-opentelemetry"`
+
+	// OpentelemetryConfig sets the opentelemetry config file
+	// Default: /etc/nginx/opentelemetry.toml
+	OpentelemetryConfig string `json:"opentelemetry-config"`
+
+	// OpentelemetryOperationName specifies a custom name for the server span
+	OpentelemetryOperationName string `json:"opentelemetry-operation-name"`
+
+	// OpentelemetryTrustIncomingSpan sets whether or not to trust incoming trace spans
+	// If false, incoming span headers will be rejected
+	// Default: true
+	OpentelemetryTrustIncomingSpan bool `json:"opentelemetry-trust-incoming-span"`
+
+	// OtlpCollectorHost specifies the host to use when uploading traces
+	OtlpCollectorHost string `json:"otlp-collector-host"`
+
+	// OtlpCollectorPort specifies the port to use when uploading traces
+	// Default: 4317
+	OtlpCollectorPort string `json:"otlp-collector-port"`
+
+	// OtelServiceName specifies the service name to use for any traces created
+	// Default: nginx
+	OtelServiceName string `json:"otel-service-name"`
+
+	// OtelSampler specifies the sampler to use for any traces created
+	// Default: AlwaysOn
+	OtelSampler string `json:"otel-sampler"`
+
+	// OtelSamplerRatio specifies the sampler ratio to use for any traces created
+	// Default: 0.01
+	OtelSamplerRatio float32 `json:"otel-sampler-ratio"`
+
+	//OtelSamplerParentBased specifies the parent based sampler to be use for any traces created
+	// Default: true
+	OtelSamplerParentBased bool `json:"otel-sampler-parent-based"`
+
+	// MaxQueueSize specifies the max queue size for uploading traces
+	// Default: 2048
+	OtelMaxQueueSize int32 `json:"otel-max-queuesize"`
+
+	// ScheduleDelayMillis specifies the max delay between uploading traces
+	// Default: 5000
+	OtelScheduleDelayMillis int32 `json:"otel-schedule-delay-millis"`
+
+	// MaxExportBatchSize specifies the max export batch size to used when uploading traces
+	// Default: 512
+	OtelMaxExportBatchSize int32 `json:"otel-max-export-batch-size"`
 
 	// ZipkinCollectorHost specifies the host to use when uploading traces
 	ZipkinCollectorHost string `json:"zipkin-collector-host"`
@@ -641,6 +726,9 @@ type Configuration struct {
 	// ServerSnippet adds custom configuration to all the servers in the nginx configuration
 	ServerSnippet string `json:"server-snippet"`
 
+	// StreamSnippet adds custom configuration to the stream section of the nginx configuration
+	StreamSnippet string `json:"stream-snippet"`
+
 	// LocationSnippet adds custom configuration to all the locations in the nginx configuration
 	LocationSnippet string `json:"location-snippet"`
 
@@ -743,6 +831,17 @@ type Configuration struct {
 	// GlobalRateLimitStatucCode determines the HTTP status code to return
 	// when limit is exceeding during global rate limiting.
 	GlobalRateLimitStatucCode int `json:"global-rate-limit-status-code"`
+
+	// DebugConnections Enables debugging log for selected client connections
+	// http://nginx.org/en/docs/ngx_core_module.html#debug_connection
+	// Default: ""
+	DebugConnections []string `json:"debug-connections"`
+
+	// StrictValidatePathType enable the strict validation of Ingress Paths
+	// It enforces that pathType of type Exact or Prefix should start with / and contain only
+	// alphanumeric chars, "-", "_", "/".In case of additional characters,
+	// like used on Rewrite configurations the user should use pathType as ImplementationSpecific
+	StrictValidatePathType bool `json:"strict-validate-path-type"`
 }
 
 // NewDefault returns the default nginx configuration
@@ -753,17 +852,16 @@ func NewDefault() Configuration {
 	defNginxStatusIpv4Whitelist := make([]string, 0)
 	defNginxStatusIpv6Whitelist := make([]string, 0)
 	defResponseHeaders := make([]string, 0)
-
 	defIPCIDR = append(defIPCIDR, "0.0.0.0/0")
 	defNginxStatusIpv4Whitelist = append(defNginxStatusIpv4Whitelist, "127.0.0.1")
 	defNginxStatusIpv6Whitelist = append(defNginxStatusIpv6Whitelist, "::1")
 	defProxyDeadlineDuration := time.Duration(5) * time.Second
-	defGlobalExternalAuth := GlobalExternalAuth{"", "", "", "", "", append(defResponseHeaders, ""), "", "", "", []string{}, map[string]string{}}
+	defGlobalExternalAuth := GlobalExternalAuth{"", "", "", "", "", append(defResponseHeaders, ""), "", "", "", []string{}, map[string]string{}, false}
 
 	cfg := Configuration{
-
 		AllowSnippetAnnotations:          true,
 		AllowBackendServerHeader:         false,
+		AnnotationValueWordBlocklist:     "",
 		AccessLogPath:                    "/var/log/nginx/access.log",
 		AccessLogParams:                  "",
 		EnableAccessLogForDefaultBackend: false,
@@ -773,6 +871,7 @@ func NewDefault() Configuration {
 		BlockUserAgents:                  defBlockEntity,
 		BlockReferers:                    defBlockEntity,
 		BrotliLevel:                      4,
+		BrotliMinLength:                  20,
 		BrotliTypes:                      brotliTypes,
 		ClientHeaderBufferSize:           "1k",
 		ClientHeaderTimeout:              60,
@@ -786,9 +885,9 @@ func NewDefault() Configuration {
 		ComputeFullForwardedFor:          false,
 		ProxyAddOriginalURIHeader:        false,
 		GenerateRequestID:                true,
-		HTTP2MaxFieldSize:                "4k",
-		HTTP2MaxHeaderSize:               "16k",
-		HTTP2MaxRequests:                 1000,
+		HTTP2MaxFieldSize:                "",
+		HTTP2MaxHeaderSize:               "",
+		HTTP2MaxRequests:                 0,
 		HTTP2MaxConcurrentStreams:        128,
 		HTTPRedirectCode:                 308,
 		HSTS:                             true,
@@ -800,7 +899,7 @@ func NewDefault() Configuration {
 		GzipMinLength:                    256,
 		GzipTypes:                        gzipTypes,
 		KeepAlive:                        75,
-		KeepAliveRequests:                100,
+		KeepAliveRequests:                1000,
 		LargeClientHeaderBuffers:         "4 8k",
 		LogFormatEscapeJSON:              false,
 		LogFormatStream:                  logFormatStream,
@@ -824,6 +923,7 @@ func NewDefault() Configuration {
 		SSLECDHCurve:                     "auto",
 		SSLProtocols:                     sslProtocols,
 		SSLEarlyData:                     sslEarlyData,
+		SSLRejectHandshake:               false,
 		SSLSessionCache:                  true,
 		SSLSessionCacheSize:              sslSessionCacheSize,
 		SSLSessionTickets:                false,
@@ -859,6 +959,7 @@ func NewDefault() Configuration {
 			PreserveTrailingSlash:    false,
 			SSLRedirect:              true,
 			CustomHTTPErrors:         []int{},
+			DenylistSourceRange:      []string{},
 			WhitelistSourceRange:     []string{},
 			SkipAccessLogURLs:        []string{},
 			LimitRate:                0,
@@ -869,11 +970,23 @@ func NewDefault() Configuration {
 			ServiceUpstream:          false,
 		},
 		UpstreamKeepaliveConnections:           320,
+		UpstreamKeepaliveTime:                  "1h",
 		UpstreamKeepaliveTimeout:               60,
 		UpstreamKeepaliveRequests:              10000,
 		LimitConnZoneVariable:                  defaultLimitConnZoneVariable,
 		BindAddressIpv4:                        defBindAddress,
 		BindAddressIpv6:                        defBindAddress,
+		OpentracingTrustIncomingSpan:           true,
+		OpentelemetryTrustIncomingSpan:         true,
+		OpentelemetryConfig:                    "/etc/nginx/opentelemetry.toml",
+		OtlpCollectorPort:                      "4317",
+		OtelServiceName:                        "nginx",
+		OtelSampler:                            "AlwaysOn",
+		OtelSamplerRatio:                       0.01,
+		OtelSamplerParentBased:                 true,
+		OtelScheduleDelayMillis:                5000,
+		OtelMaxExportBatchSize:                 512,
+		OtelMaxQueueSize:                       2048,
 		ZipkinCollectorPort:                    9411,
 		ZipkinServiceName:                      "nginx",
 		ZipkinSampleRate:                       1.0,
@@ -903,6 +1016,8 @@ func NewDefault() Configuration {
 		GlobalRateLimitMemcachedMaxIdleTimeout: 10000,
 		GlobalRateLimitMemcachedPoolSize:       50,
 		GlobalRateLimitStatucCode:              429,
+		DebugConnections:                       []string{},
+		StrictValidatePathType:                 false, // TODO: This will be true in future releases
 	}
 
 	if klog.V(5).Enabled() {
@@ -934,11 +1049,11 @@ type TemplateConfig struct {
 	EnableMetrics            bool
 	MaxmindEditionFiles      *[]string
 	MonitorMaxBatchSize      int
-
-	PID        string
-	StatusPath string
-	StatusPort int
-	StreamPort int
+	PID                      string
+	StatusPath               string
+	StatusPort               int
+	StreamPort               int
+	StreamSnippets           []string
 }
 
 // ListenPorts describe the ports required to run the
@@ -966,4 +1081,5 @@ type GlobalExternalAuth struct {
 	AuthCacheKey           string            `json:"authCacheKey"`
 	AuthCacheDuration      []string          `json:"authCacheDuration"`
 	ProxySetHeaders        map[string]string `json:"proxySetHeaders,omitempty"`
+	AlwaysSetCookie        bool              `json:"alwaysSetCookie,omitempty"`
 }

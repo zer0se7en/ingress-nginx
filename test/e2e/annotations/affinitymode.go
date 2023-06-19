@@ -22,7 +22,7 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 
 	"k8s.io/ingress-nginx/test/e2e/framework"
@@ -34,12 +34,15 @@ var _ = framework.DescribeAnnotation("affinitymode", func() {
 	ginkgo.It("Balanced affinity mode should balance", func() {
 		deploymentName := "affinitybalanceecho"
 		replicas := 5
-		f.NewEchoDeploymentWithNameAndReplicas(deploymentName, replicas)
+		f.NewEchoDeployment(
+			framework.WithDeploymentName(deploymentName),
+			framework.WithDeploymentReplicas(replicas),
+		)
 
 		host := "affinity-mode-balance.com"
 		annotations := make(map[string]string)
 		annotations["nginx.ingress.kubernetes.io/affinity"] = "cookie"
-		annotations["ginx.ingress.kubernetes.io/session-cookie-name"] = "hello-cookie"
+		annotations["nginx.ingress.kubernetes.io/session-cookie-name"] = "hello-cookie"
 		annotations["nginx.ingress.kubernetes.io/session-cookie-expires"] = "172800"
 		annotations["nginx.ingress.kubernetes.io/session-cookie-max-age"] = "172800"
 		annotations["nginx.ingress.kubernetes.io/ssl-redirect"] = "false"
@@ -64,12 +67,15 @@ var _ = framework.DescribeAnnotation("affinitymode", func() {
 	ginkgo.It("Check persistent affinity mode", func() {
 		deploymentName := "affinitypersistentecho"
 		replicas := 5
-		f.NewEchoDeploymentWithNameAndReplicas(deploymentName, replicas)
+		f.NewEchoDeployment(
+			framework.WithDeploymentName(deploymentName),
+			framework.WithDeploymentReplicas(replicas),
+		)
 
 		host := "affinity-mode-persistent.com"
 		annotations := make(map[string]string)
 		annotations["nginx.ingress.kubernetes.io/affinity"] = "cookie"
-		annotations["ginx.ingress.kubernetes.io/session-cookie-name"] = "hello-cookie"
+		annotations["nginx.ingress.kubernetes.io/session-cookie-name"] = "hello-cookie"
 		annotations["nginx.ingress.kubernetes.io/session-cookie-expires"] = "172800"
 		annotations["nginx.ingress.kubernetes.io/session-cookie-max-age"] = "172800"
 		annotations["nginx.ingress.kubernetes.io/ssl-redirect"] = "false"

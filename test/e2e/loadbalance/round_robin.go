@@ -22,7 +22,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 
 	"k8s.io/ingress-nginx/test/e2e/framework"
@@ -32,7 +32,7 @@ var _ = framework.DescribeSetting("[Load Balancer] round-robin", func() {
 	f := framework.NewDefaultFramework("round-robin")
 
 	ginkgo.BeforeEach(func() {
-		f.NewEchoDeploymentWithReplicas(3)
+		f.NewEchoDeployment(framework.WithDeploymentReplicas(3))
 		f.UpdateNginxConfigMapData("worker-processes", "1")
 	})
 

@@ -2,9 +2,13 @@
 
 This example demonstrates how to use a custom backend to render custom error pages.
 
+If you are using Helm Chart, look at [example values](https://github.com/kubernetes/ingress-nginx/blob/main/docs/examples/customization/custom-errors/custom-default-backend.helm.values.yaml) and don't forget to add [configMap](https://github.com/kubernetes/ingress-nginx/blob/main/docs/examples/customization/custom-errors/custom-default-backend-error_pages.configMap.yaml) to your deployment, otherwise continue with [Customized default backend](#customized-default-backend) manual deployment.
+
 ## Customized default backend
 
-First, create the custom `default-backend`. It will be used by the Ingress controller later on.
+First, create the custom `default-backend`. It will be used by the Ingress controller later on.  
+To do that, you can take a look at the [example manifest](https://github.com/kubernetes/ingress-nginx/blob/main/docs/examples/customization/custom-errors/custom-default-backend.yaml)
+in this project's GitHub repository.
 
 ```
 $ kubectl create -f custom-default-backend.yaml
@@ -25,7 +29,7 @@ service/nginx-errors   ClusterIP   10.0.0.12   <none>        80/TCP    10s
 
 ## Ingress controller configuration
 
-If you do not already have an instance of the NGINX Ingress controller running, deploy it according to the
+If you do not already have an instance of the Ingress-Nginx Controller running, deploy it according to the
 [deployment guide][deploy], then follow these steps:
 
 1. Edit the `ingress-nginx-controller` Deployment and set the value of the `--default-backend-service` flag to the name of the
@@ -33,7 +37,7 @@ If you do not already have an instance of the NGINX Ingress controller running, 
 
 2. Edit the `ingress-nginx-controller` ConfigMap and create the key `custom-http-errors` with a value of `404,503`.
 
-3. Take note of the IP address assigned to the NGINX Ingress controller Service.
+3. Take note of the IP address assigned to the Ingress-Nginx Controller Service.
     ```
     $ kubectl get svc ingress-nginx
     NAME            TYPE        CLUSTER-IP  EXTERNAL-IP   PORT(S)          AGE

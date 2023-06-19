@@ -18,13 +18,12 @@ package annotations
 
 import (
 	"fmt"
-	"math"
 	"net/http"
 	"reflect"
 	"regexp"
 	"strings"
 
-	"github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 
 	"k8s.io/ingress-nginx/test/e2e/framework"
@@ -39,10 +38,10 @@ var _ = framework.DescribeAnnotation("canary-*", func() {
 
 	ginkgo.BeforeEach(func() {
 		// Deployment for main backend
-		f.NewEchoDeploymentWithReplicas(1)
+		f.NewEchoDeployment()
 
 		// Deployment for canary backend
-		f.NewEchoDeploymentWithNameAndReplicas(canaryService, 1)
+		f.NewEchoDeployment(framework.WithDeploymentName(canaryService))
 	})
 
 	ginkgo.Context("when canary is created", func() {
@@ -132,7 +131,7 @@ var _ = framework.DescribeAnnotation("canary-*", func() {
 
 				ginkgo.By("returning a 503 status when the mainline deployment has 0 replicas and a request is sent to the canary")
 
-				f.NewEchoDeploymentWithReplicas(0)
+				f.NewEchoDeployment(framework.WithDeploymentReplicas(0))
 
 				resp, _, errs := gorequest.New().
 					Get(f.GetURL(framework.HTTP)).
@@ -145,8 +144,8 @@ var _ = framework.DescribeAnnotation("canary-*", func() {
 
 				ginkgo.By("returning a 200 status when the canary deployment has 0 replicas and a request is sent to the mainline ingress")
 
-				f.NewEchoDeploymentWithReplicas(1)
-				f.NewDeployment(canaryService, "k8s.gcr.io/e2e-test-images/echoserver:2.3", 8080, 0)
+				f.NewEchoDeployment()
+				f.NewDeployment(canaryService, "registry.k8s.io/e2e-test-images/echoserver:2.3", 8080, 0)
 
 				resp, _, errs = gorequest.New().
 					Get(f.GetURL(framework.HTTP)).
@@ -773,7 +772,40 @@ var _ = framework.DescribeAnnotation("canary-*", func() {
 				Contains(canaryService)
 		})
 
-		ginkgo.It("should route requests evenly split between mainline and canary if canary weight is 50", func() {
+		ginkgo.It("should route requests only to canary if canary weight is equal to canary weight total", func() {
+			host := "foo"
+			annotations := map[string]string{}
+
+			ing := framework.NewSingleIngress(host, "/", host,
+				f.Namespace, framework.EchoService, 80, annotations)
+			f.EnsureIngress(ing)
+
+			f.WaitForNginxServer(host,
+				func(server string) bool {
+					return strings.Contains(server, "server_name foo")
+				})
+
+			canaryIngName := fmt.Sprintf("%v-canary", host)
+			canaryAnnotations := map[string]string{
+				"nginx.ingress.kubernetes.io/canary":              "true",
+				"nginx.ingress.kubernetes.io/canary-weight":       "1000",
+				"nginx.ingress.kubernetes.io/canary-weight-total": "1000",
+			}
+
+			canaryIng := framework.NewSingleIngress(canaryIngName, "/", host,
+				f.Namespace, canaryService, 80, canaryAnnotations)
+			f.EnsureIngress(canaryIng)
+
+			f.HTTPTestClient().
+				GET("/").
+				WithHeader("Host", host).
+				Expect().
+				Status(http.StatusOK).
+				Body().
+				Contains(canaryService)
+		})
+
+		ginkgo.It("should route requests split between mainline and canary if canary weight is 50", func() {
 			host := "foo"
 			annotations := map[string]string{}
 
@@ -796,7 +828,34 @@ var _ = framework.DescribeAnnotation("canary-*", func() {
 				f.Namespace, canaryService, 80, canaryAnnotations)
 			f.EnsureIngress(canaryIng)
 
-			TestEvenMainlineCanaryDistribution(f, host)
+			TestMainlineCanaryDistribution(f, host)
+		})
+
+		ginkgo.It("should route requests split between mainline and canary if canary weight is 100 and weight total is 200", func() {
+			host := "foo"
+			annotations := map[string]string{}
+
+			ing := framework.NewSingleIngress(host, "/", host,
+				f.Namespace, framework.EchoService, 80, annotations)
+			f.EnsureIngress(ing)
+
+			f.WaitForNginxServer(host,
+				func(server string) bool {
+					return strings.Contains(server, "server_name foo")
+				})
+
+			canaryIngName := fmt.Sprintf("%v-canary", host)
+			canaryAnnotations := map[string]string{
+				"nginx.ingress.kubernetes.io/canary":              "true",
+				"nginx.ingress.kubernetes.io/canary-weight":       "100",
+				"nginx.ingress.kubernetes.io/canary-weight-total": "200",
+			}
+
+			canaryIng := framework.NewSingleIngress(canaryIngName, "/", host,
+				f.Namespace, canaryService, 80, canaryAnnotations)
+			f.EnsureIngress(canaryIng)
+
+			TestMainlineCanaryDistribution(f, host)
 		})
 	})
 
@@ -1046,18 +1105,24 @@ var _ = framework.DescribeAnnotation("canary-*", func() {
 				}
 			}
 
-			TestEvenMainlineCanaryDistribution(f, host)
+			TestMainlineCanaryDistribution(f, host)
 		})
 	})
 
 })
 
 // This method assumes canary weight being configured at 50%.
-func TestEvenMainlineCanaryDistribution(f *framework.Framework, host string) {
+func TestMainlineCanaryDistribution(f *framework.Framework, host string) {
 	re := regexp.MustCompile(fmt.Sprintf(`%s.*`, framework.EchoService))
 	replicaRequestCount := map[string]int{}
 
-	for i := 0; i < 200; i++ {
+	// The implementation of choice by weight doesn't guarantee exact
+	// number of requests, so verify if mainline and canary have at
+	// least some requests
+	requestsToGet := 200
+	requestsNumberToTest := (40 * requestsToGet) / 100
+
+	for i := 0; i < requestsToGet; i++ {
 		body := f.HTTPTestClient().
 			GET("/").
 			WithHeader("Host", host).
@@ -1078,8 +1143,6 @@ func TestEvenMainlineCanaryDistribution(f *framework.Framework, host string) {
 
 	assert.Equal(ginkgo.GinkgoT(), 2, len(keys))
 
-	// The implmentation of choice by weight doesn't guarantee exact
-	// number of requests, so verify if request imbalance is within an
-	// acceptable range.
-	assert.LessOrEqual(ginkgo.GinkgoT(), math.Abs(float64(replicaRequestCount[keys[0].String()]-replicaRequestCount[keys[1].String()]))/math.Max(float64(replicaRequestCount[keys[0].String()]), float64(replicaRequestCount[keys[1].String()])), 0.2)
+	assert.GreaterOrEqual(ginkgo.GinkgoT(), int(replicaRequestCount[keys[0].String()]), requestsNumberToTest)
+	assert.GreaterOrEqual(ginkgo.GinkgoT(), int(replicaRequestCount[keys[1].String()]), requestsNumberToTest)
 }

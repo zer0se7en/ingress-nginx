@@ -22,7 +22,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/v2"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -42,7 +42,7 @@ const (
 	Poll = 2 * time.Second
 
 	// DefaultTimeout time to wait for operations to complete
-	DefaultTimeout = 5 * time.Minute
+	DefaultTimeout = 90 * time.Second
 )
 
 func nowStamp() string {
@@ -85,14 +85,15 @@ func RestclientConfig(config, context string) (*api.Config, error) {
 // RunID unique identifier of the e2e run
 var RunID = uuid.NewUUID()
 
-// CreateKubeNamespace creates a new namespace in the cluster
-func CreateKubeNamespace(baseName string, c kubernetes.Interface) (string, error) {
+func createNamespace(baseName string, labels map[string]string, c kubernetes.Interface) (string, error) {
 	ts := time.Now().UnixNano()
 	ns := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: fmt.Sprintf("e2e-tests-%v-%v-", baseName, ts),
+			Labels:       labels,
 		},
 	}
+
 	// Be robust about making the namespace creation call.
 	var got *corev1.Namespace
 	var err error
@@ -111,8 +112,20 @@ func CreateKubeNamespace(baseName string, c kubernetes.Interface) (string, error
 	return got.Name, nil
 }
 
-// deleteKubeNamespace deletes a namespace and all the objects inside
-func deleteKubeNamespace(c kubernetes.Interface, namespace string) error {
+// CreateKubeNamespace creates a new namespace in the cluster
+func CreateKubeNamespace(baseName string, c kubernetes.Interface) (string, error) {
+
+	return createNamespace(baseName, nil, c)
+}
+
+// CreateKubeNamespaceWithLabel creates a new namespace with given labels in the cluster
+func CreateKubeNamespaceWithLabel(baseName string, labels map[string]string, c kubernetes.Interface) (string, error) {
+
+	return createNamespace(baseName, labels, c)
+}
+
+// DeleteKubeNamespace deletes a namespace and all the objects inside
+func DeleteKubeNamespace(c kubernetes.Interface, namespace string) error {
 	grace := int64(0)
 	pb := metav1.DeletePropagationBackground
 	return c.CoreV1().Namespaces().Delete(context.TODO(), namespace, metav1.DeleteOptions{
@@ -176,7 +189,7 @@ func CreateIngressClass(namespace string, c kubernetes.Interface) (string, error
 	return ic.Name, nil
 }
 
-//deleteIngressClass deletes an IngressClass and its related ClusterRole* objects
+// deleteIngressClass deletes an IngressClass and its related ClusterRole* objects
 func deleteIngressClass(c kubernetes.Interface, ingressclass string) error {
 	var err error
 	grace := int64(0)
@@ -202,7 +215,7 @@ func deleteIngressClass(c kubernetes.Interface, ingressclass string) error {
 	return nil
 }
 
-//GetIngressClassName returns the default IngressClassName given a namespace
+// GetIngressClassName returns the default IngressClassName given a namespace
 func GetIngressClassName(namespace string) *string {
 	icname := fmt.Sprintf("ic-%s", namespace)
 	return &icname

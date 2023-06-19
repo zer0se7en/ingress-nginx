@@ -17,20 +17,25 @@ limitations under the License.
 package settings
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"regexp"
 	"strings"
 
-	"github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	networking "k8s.io/api/networking/v1"
 	"k8s.io/ingress-nginx/test/e2e/framework"
 )
 
 var _ = framework.DescribeSetting("[Security] global-auth-url", func() {
-	f := framework.NewDefaultFramework("global-external-auth")
+	f := framework.NewDefaultFramework(
+		"global-external-auth",
+		framework.WithHTTPBunEnabled(),
+	)
 
 	host := "global-external-auth"
 
@@ -48,13 +53,12 @@ var _ = framework.DescribeSetting("[Security] global-auth-url", func() {
 
 	ginkgo.BeforeEach(func() {
 		f.NewEchoDeployment()
-		f.NewHttpbinDeployment()
 	})
 
 	ginkgo.Context("when global external authentication is configured", func() {
 
 		ginkgo.BeforeEach(func() {
-			globalExternalAuthURL := fmt.Sprintf("http://%s.%s.svc.cluster.local:80/status/401", framework.HTTPBinService, f.Namespace)
+			globalExternalAuthURL := fmt.Sprintf("http://%s.%s.svc.cluster.local:80/status/401", framework.HTTPBunService, f.Namespace)
 
 			ginkgo.By("Adding an ingress rule for /foo")
 			fooIng := framework.NewSingleIngress("foo-ingress", fooPath, host, f.Namespace, echoServiceName, 80, nil)
@@ -150,13 +154,13 @@ var _ = framework.DescribeSetting("[Security] global-auth-url", func() {
 				Status(http.StatusOK)
 		})
 
-		ginkgo.It("should still return status code 200 after auth backend is deleted using cache ", func() {
+		ginkgo.It("should still return status code 200 after auth backend is deleted using cache", func() {
 
 			globalExternalAuthCacheKeySetting := "global-auth-cache-key"
 			globalExternalAuthCacheKey := "foo"
 			globalExternalAuthCacheDurationSetting := "global-auth-cache-duration"
 			globalExternalAuthCacheDuration := "200 201 401 30m"
-			globalExternalAuthURL := fmt.Sprintf("http://%s.%s.svc.cluster.local:80/status/200", framework.HTTPBinService, f.Namespace)
+			globalExternalAuthURL := fmt.Sprintf("http://%s.%s.svc.cluster.local:80/status/200", framework.HTTPBunService, f.Namespace)
 
 			ginkgo.By("Adding a global-auth-cache-key to configMap")
 			f.SetNginxConfigMapData(map[string]string{
@@ -180,7 +184,7 @@ var _ = framework.DescribeSetting("[Security] global-auth-url", func() {
 				Expect().
 				Status(http.StatusOK)
 
-			err := f.DeleteDeployment(framework.HTTPBinService)
+			err := f.DeleteDeployment(framework.HTTPBunService)
 			assert.Nil(ginkgo.GinkgoT(), err)
 			framework.Sleep()
 
@@ -259,4 +263,101 @@ var _ = framework.DescribeSetting("[Security] global-auth-url", func() {
 
 	})
 
+	ginkgo.Context("cookie set by external authentication server", func() {
+		host := "global-external-auth-check-cookies"
+		var ing1, ing2 *networking.Ingress
+
+		cfg := `#
+events {
+	worker_connections  1024;
+	multi_accept on;
+}
+
+http {
+	default_type 'text/plain';
+	client_max_body_size 0;
+
+	server {
+		access_log on;
+		access_log /dev/stdout;
+
+		listen 80;
+
+		location ~ ^/cookies/set/(?<key>.*)/(?<value>.*) {
+			content_by_lua_block {
+				ngx.header['Set-Cookie'] = {ngx.var.key.."="..ngx.var.value}
+				ngx.say("OK")
+			}
+		}
+
+		location / {
+			return 200;
+		}
+
+		location /error {
+			return 503;
+		}
+	}
+}
+`
+		ginkgo.BeforeEach(func() {
+			f.NGINXWithConfigDeployment("http-cookie-with-error", cfg)
+
+			e, err := f.KubeClientSet.CoreV1().Endpoints(f.Namespace).Get(context.TODO(), "http-cookie-with-error", metav1.GetOptions{})
+			assert.Nil(ginkgo.GinkgoT(), err)
+
+			assert.GreaterOrEqual(ginkgo.GinkgoT(), len(e.Subsets), 1, "expected at least one endpoint")
+			assert.GreaterOrEqual(ginkgo.GinkgoT(), len(e.Subsets[0].Addresses), 1, "expected at least one address ready in the endpoint")
+
+			nginxIP := e.Subsets[0].Addresses[0].IP
+
+			f.UpdateNginxConfigMapData(globalExternalAuthURLSetting, fmt.Sprintf("http://%s/cookies/set/alma/armud", nginxIP))
+
+			ing1 = framework.NewSingleIngress(host, "/", host, f.Namespace, "http-cookie-with-error", 80, nil)
+			f.EnsureIngress(ing1)
+
+			ing2 = framework.NewSingleIngress(host+"-error", "/error", host, f.Namespace, "http-cookie-with-error", 80, nil)
+			f.EnsureIngress(ing2)
+
+			f.WaitForNginxServer(host, func(server string) bool {
+				return strings.Contains(server, "server_name "+host)
+			})
+
+		})
+
+		ginkgo.It("user retains cookie by default", func() {
+			f.HTTPTestClient().
+				GET("/").
+				WithHeader("Host", host).
+				WithQuery("a", "b").
+				WithQuery("c", "d").
+				Expect().
+				Status(http.StatusOK).
+				Header("Set-Cookie").Contains("alma=armud")
+		})
+
+		ginkgo.It("user does not retain cookie if upstream returns error status code", func() {
+			f.HTTPTestClient().
+				GET("/error").
+				WithHeader("Host", host).
+				WithQuery("a", "b").
+				WithQuery("c", "d").
+				Expect().
+				Status(http.StatusServiceUnavailable).
+				Header("Set-Cookie").Contains("")
+		})
+
+		ginkgo.It("user with global-auth-always-set-cookie key in configmap retains cookie if upstream returns error status code", func() {
+			f.UpdateNginxConfigMapData("global-auth-always-set-cookie", "true")
+
+			f.HTTPTestClient().
+				GET("/error").
+				WithHeader("Host", host).
+				WithQuery("a", "b").
+				WithQuery("c", "d").
+				Expect().
+				Status(http.StatusServiceUnavailable).
+				Header("Set-Cookie").Contains("alma=armud")
+		})
+	})
 })

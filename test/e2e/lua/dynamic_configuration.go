@@ -24,7 +24,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 	networking "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -43,7 +43,7 @@ var _ = framework.IngressNginxDescribe("[Lua] dynamic configuration", func() {
 	f := framework.NewDefaultFramework("dynamic-configuration")
 
 	ginkgo.BeforeEach(func() {
-		f.NewEchoDeploymentWithReplicas(1)
+		f.NewEchoDeployment()
 		ensureIngress(f, "foo.com", framework.EchoService)
 	})
 
@@ -124,7 +124,10 @@ var _ = framework.IngressNginxDescribe("[Lua] dynamic configuration", func() {
 
 		ginkgo.It("handles endpoints only changes consistently (down scaling of replicas vs. empty service)", func() {
 			deploymentName := "scalingecho"
-			f.NewEchoDeploymentWithNameAndReplicas(deploymentName, 0)
+			f.NewEchoDeployment(
+				framework.WithDeploymentName(deploymentName),
+				framework.WithDeploymentReplicas(0),
+			)
 			createIngress(f, "scaling.foo.com", deploymentName)
 
 			resp := f.HTTPTestClient().

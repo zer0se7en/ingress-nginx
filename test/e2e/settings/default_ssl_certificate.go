@@ -22,7 +22,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -38,7 +38,7 @@ var _ = framework.IngressNginxDescribe("[SSL] [Flag] default-ssl-certificate", f
 	port := 80
 
 	ginkgo.BeforeEach(func() {
-		f.NewEchoDeploymentWithReplicas(1)
+		f.NewEchoDeployment(framework.WithDeploymentReplicas(1))
 
 		var err error
 		tlsConfig, err = framework.CreateIngressTLSSecret(f.KubeClientSet,

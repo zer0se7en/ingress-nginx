@@ -31,13 +31,14 @@ import (
 	networking "k8s.io/api/networking/v1"
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
-	"k8s.io/ingress-nginx/internal/ingress"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/parser"
 	"k8s.io/ingress-nginx/internal/ingress/controller/ingressclass"
+	"k8s.io/ingress-nginx/pkg/apis/ingress"
 	"k8s.io/ingress-nginx/test/e2e/framework"
 )
 
@@ -89,6 +90,8 @@ func TestStore(t *testing.T) {
 		t.Fatalf("error: %v", err)
 	}
 
+	emptySelector, _ := labels.Parse("")
+
 	defer te.Stop()
 
 	clientSet, err := kubernetes.NewForConfig(cfg)
@@ -112,6 +115,7 @@ func TestStore(t *testing.T) {
 
 		storer := New(
 			ns,
+			emptySelector,
 			fmt.Sprintf("%v/config", ns),
 			fmt.Sprintf("%v/tcp", ns),
 			fmt.Sprintf("%v/udp", ns),
@@ -120,7 +124,9 @@ func TestStore(t *testing.T) {
 			clientSet,
 			updateCh,
 			false,
-			DefaultClassConfig)
+			true,
+			DefaultClassConfig,
+			false)
 
 		storer.Run(stopCh)
 
@@ -191,6 +197,7 @@ func TestStore(t *testing.T) {
 
 		storer := New(
 			ns,
+			emptySelector,
 			fmt.Sprintf("%v/config", ns),
 			fmt.Sprintf("%v/tcp", ns),
 			fmt.Sprintf("%v/udp", ns),
@@ -199,7 +206,9 @@ func TestStore(t *testing.T) {
 			clientSet,
 			updateCh,
 			false,
-			DefaultClassConfig)
+			true,
+			DefaultClassConfig,
+			false)
 
 		storer.Run(stopCh)
 		ic := createIngressClass(clientSet, t, "not-k8s.io/not-ingress-nginx")
@@ -293,6 +302,7 @@ func TestStore(t *testing.T) {
 
 		storer := New(
 			ns,
+			emptySelector,
 			fmt.Sprintf("%v/config", ns),
 			fmt.Sprintf("%v/tcp", ns),
 			fmt.Sprintf("%v/udp", ns),
@@ -301,7 +311,9 @@ func TestStore(t *testing.T) {
 			clientSet,
 			updateCh,
 			false,
-			DefaultClassConfig)
+			true,
+			DefaultClassConfig,
+			false)
 
 		storer.Run(stopCh)
 		validSpec := commonIngressSpec
@@ -407,6 +419,7 @@ func TestStore(t *testing.T) {
 
 		storer := New(
 			ns,
+			emptySelector,
 			fmt.Sprintf("%v/config", ns),
 			fmt.Sprintf("%v/tcp", ns),
 			fmt.Sprintf("%v/udp", ns),
@@ -415,7 +428,9 @@ func TestStore(t *testing.T) {
 			clientSet,
 			updateCh,
 			false,
-			ingressClassconfig)
+			true,
+			ingressClassconfig,
+			false)
 
 		storer.Run(stopCh)
 
@@ -535,6 +550,7 @@ func TestStore(t *testing.T) {
 
 		storer := New(
 			ns,
+			emptySelector,
 			fmt.Sprintf("%v/config", ns),
 			fmt.Sprintf("%v/tcp", ns),
 			fmt.Sprintf("%v/udp", ns),
@@ -543,7 +559,9 @@ func TestStore(t *testing.T) {
 			clientSet,
 			updateCh,
 			false,
-			ingressClassconfig)
+			true,
+			ingressClassconfig,
+			false)
 
 		storer.Run(stopCh)
 		validSpec := commonIngressSpec
@@ -633,6 +651,7 @@ func TestStore(t *testing.T) {
 
 		storer := New(
 			ns,
+			emptySelector,
 			fmt.Sprintf("%v/config", ns),
 			fmt.Sprintf("%v/tcp", ns),
 			fmt.Sprintf("%v/udp", ns),
@@ -641,7 +660,9 @@ func TestStore(t *testing.T) {
 			clientSet,
 			updateCh,
 			false,
-			DefaultClassConfig)
+			true,
+			DefaultClassConfig,
+			false)
 
 		storer.Run(stopCh)
 
@@ -725,6 +746,7 @@ func TestStore(t *testing.T) {
 
 		storer := New(
 			ns,
+			emptySelector,
 			fmt.Sprintf("%v/config", ns),
 			fmt.Sprintf("%v/tcp", ns),
 			fmt.Sprintf("%v/udp", ns),
@@ -733,7 +755,9 @@ func TestStore(t *testing.T) {
 			clientSet,
 			updateCh,
 			false,
-			DefaultClassConfig)
+			true,
+			DefaultClassConfig,
+			false)
 
 		storer.Run(stopCh)
 		invalidSpec := commonIngressSpec
@@ -809,6 +833,7 @@ func TestStore(t *testing.T) {
 
 		storer := New(
 			ns,
+			emptySelector,
 			fmt.Sprintf("%v/config", ns),
 			fmt.Sprintf("%v/tcp", ns),
 			fmt.Sprintf("%v/udp", ns),
@@ -817,7 +842,9 @@ func TestStore(t *testing.T) {
 			clientSet,
 			updateCh,
 			false,
-			DefaultClassConfig)
+			true,
+			DefaultClassConfig,
+			false)
 
 		storer.Run(stopCh)
 
@@ -903,6 +930,7 @@ func TestStore(t *testing.T) {
 
 		storer := New(
 			ns,
+			emptySelector,
 			fmt.Sprintf("%v/config", ns),
 			fmt.Sprintf("%v/tcp", ns),
 			fmt.Sprintf("%v/udp", ns),
@@ -911,7 +939,9 @@ func TestStore(t *testing.T) {
 			clientSet,
 			updateCh,
 			false,
-			DefaultClassConfig)
+			true,
+			DefaultClassConfig,
+			false)
 
 		storer.Run(stopCh)
 
@@ -1025,6 +1055,7 @@ func TestStore(t *testing.T) {
 
 		storer := New(
 			ns,
+			emptySelector,
 			fmt.Sprintf("%v/config", ns),
 			fmt.Sprintf("%v/tcp", ns),
 			fmt.Sprintf("%v/udp", ns),
@@ -1033,7 +1064,9 @@ func TestStore(t *testing.T) {
 			clientSet,
 			updateCh,
 			false,
-			DefaultClassConfig)
+			true,
+			DefaultClassConfig,
+			false)
 
 		storer.Run(stopCh)
 
@@ -1107,6 +1140,104 @@ func TestStore(t *testing.T) {
 		}
 	})
 
+	t.Run("should not receive events whose namespace doesn't match watch namespace selector", func(t *testing.T) {
+		ns := createNamespace(clientSet, t)
+		defer deleteNamespace(ns, clientSet, t)
+		createConfigMap(clientSet, ns, t)
+
+		stopCh := make(chan struct{})
+		updateCh := channels.NewRingChannel(1024)
+
+		var add uint64
+		var upd uint64
+		var del uint64
+
+		go func(ch *channels.RingChannel) {
+			for {
+				evt, ok := <-ch.Out()
+				if !ok {
+					return
+				}
+
+				e := evt.(Event)
+				if e.Obj == nil {
+					continue
+				}
+				switch e.Type {
+				case CreateEvent:
+					atomic.AddUint64(&add, 1)
+				case UpdateEvent:
+					atomic.AddUint64(&upd, 1)
+				case DeleteEvent:
+					atomic.AddUint64(&del, 1)
+				}
+			}
+		}(updateCh)
+
+		namesapceSelector, _ := labels.Parse("foo=bar")
+		storer := New(
+			ns,
+			namesapceSelector,
+			fmt.Sprintf("%v/config", ns),
+			fmt.Sprintf("%v/tcp", ns),
+			fmt.Sprintf("%v/udp", ns),
+			"",
+			10*time.Minute,
+			clientSet,
+			updateCh,
+			false,
+			true,
+			DefaultClassConfig,
+			false)
+
+		storer.Run(stopCh)
+
+		ing := ensureIngress(&networking.Ingress{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "dummy",
+				Namespace: ns,
+			},
+			Spec: networking.IngressSpec{
+				Rules: []networking.IngressRule{
+					{
+						Host: "dummy",
+						IngressRuleValue: networking.IngressRuleValue{
+							HTTP: &networking.HTTPIngressRuleValue{
+								Paths: []networking.HTTPIngressPath{
+									{
+										Path:     "/",
+										PathType: &pathPrefix,
+										Backend: networking.IngressBackend{
+											Service: &networking.IngressServiceBackend{
+												Name: "http-svc",
+												Port: networking.ServiceBackendPort{
+													Number: 80,
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		}, clientSet, t)
+		defer deleteIngress(ing, clientSet, t)
+
+		time.Sleep(1 * time.Second)
+
+		if atomic.LoadUint64(&add) != 0 {
+			t.Errorf("expected 0 events of type Create but %v occurred", add)
+		}
+		if atomic.LoadUint64(&upd) != 0 {
+			t.Errorf("expected 0 events of type Update but %v occurred", upd)
+		}
+		if atomic.LoadUint64(&del) != 0 {
+			t.Errorf("expected 0 events of type Delete but %v occurred", del)
+		}
+
+	})
 	// test add ingress with secret it doesn't exists and then add secret
 	// check secret is generated on fs
 	// check ocsp

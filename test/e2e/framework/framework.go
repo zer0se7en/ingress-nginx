@@ -22,12 +22,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gavv/httpexpect/v2"
-	"github.com/onsi/ginkgo"
-	"github.com/pkg/errors"
+	"k8s.io/ingress-nginx/test/e2e/framework/httpexpect"
+
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/core/v1"
 	networking "k8s.io/api/networking/v1"
 	apiextcs "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
@@ -38,8 +37,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
-	restclient "k8s.io/client-go/rest"
-	"k8s.io/ingress-nginx/internal/k8s"
 	"k8s.io/klog/v2"
 )
 
@@ -61,26 +58,40 @@ var (
 type Framework struct {
 	BaseName string
 
-	IsIngressV1Ready bool
-
 	// A Kubernetes and Service Catalog client
 	KubeClientSet          kubernetes.Interface
-	KubeConfig             *restclient.Config
+	KubeConfig             *rest.Config
 	APIExtensionsClientSet apiextcs.Interface
 
 	Namespace    string
 	IngressClass string
 
-	pod *corev1.Pod
+	pod *v1.Pod
+	// We use httpbun as a service that we route to in our tests through
+	// the ingress controller. We add it as part of the framework as it
+	// is used extensively
+	HTTPBunIP      string
+	HTTPBunEnabled bool
+}
+
+// WithHTTPBunEnabled deploys an instance of HTTPBun for the specific test
+func WithHTTPBunEnabled() func(*Framework) {
+	return func(f *Framework) {
+		f.HTTPBunEnabled = true
+	}
 }
 
 // NewDefaultFramework makes a new framework and sets up a BeforeEach/AfterEach for
 // you (you can write additional before/after each functions).
-func NewDefaultFramework(baseName string) *Framework {
+func NewDefaultFramework(baseName string, opts ...func(*Framework)) *Framework {
 	defer ginkgo.GinkgoRecover()
 
 	f := &Framework{
 		BaseName: baseName,
+	}
+	// set framework options
+	for _, o := range opts {
+		o(f)
 	}
 
 	ginkgo.BeforeEach(f.BeforeEach)
@@ -89,8 +100,26 @@ func NewDefaultFramework(baseName string) *Framework {
 	return f
 }
 
-// BeforeEach gets a client and makes a namespace.
-func (f *Framework) BeforeEach() {
+// NewSimpleFramework makes a new framework that allows the usage of a namespace
+// for arbitraty tests.
+func NewSimpleFramework(baseName string, opts ...func(*Framework)) *Framework {
+	defer ginkgo.GinkgoRecover()
+
+	f := &Framework{
+		BaseName: baseName,
+	}
+	// set framework options
+	for _, o := range opts {
+		o(f)
+	}
+
+	ginkgo.BeforeEach(f.CreateEnvironment)
+	ginkgo.AfterEach(f.DestroyEnvironment)
+
+	return f
+}
+
+func (f *Framework) CreateEnvironment() {
 	var err error
 
 	if f.KubeClientSet == nil {
@@ -103,11 +132,23 @@ func (f *Framework) BeforeEach() {
 		f.KubeClientSet, err = kubernetes.NewForConfig(f.KubeConfig)
 		assert.Nil(ginkgo.GinkgoT(), err, "creating a kubernetes client")
 
-		f.IsIngressV1Ready = k8s.NetworkingIngressAvailable(f.KubeClientSet)
 	}
 
 	f.Namespace, err = CreateKubeNamespace(f.BaseName, f.KubeClientSet)
 	assert.Nil(ginkgo.GinkgoT(), err, "creating namespace")
+}
+
+func (f *Framework) DestroyEnvironment() {
+	defer ginkgo.GinkgoRecover()
+	err := DeleteKubeNamespace(f.KubeClientSet, f.Namespace)
+	assert.Nil(ginkgo.GinkgoT(), err, "deleting namespace %v", f.Namespace)
+}
+
+// BeforeEach gets a client and makes a namespace.
+func (f *Framework) BeforeEach() {
+	var err error
+
+	f.CreateEnvironment()
 
 	f.IngressClass, err = CreateIngressClass(f.Namespace, f.KubeClientSet)
 	assert.Nil(ginkgo.GinkgoT(), err, "creating IngressClass")
@@ -119,31 +160,32 @@ func (f *Framework) BeforeEach() {
 	assert.Nil(ginkgo.GinkgoT(), err, "updating ingress controller pod information")
 
 	f.WaitForNginxListening(80)
+
+	// If HTTPBun is enabled deploy an instance to the namespace
+	if f.HTTPBunEnabled {
+		f.HTTPBunIP = f.NewHttpbunDeployment()
+	}
 }
 
 // AfterEach deletes the namespace, after reading its events.
 func (f *Framework) AfterEach() {
-	defer func(kubeClient kubernetes.Interface, ns string) {
-		go func() {
-			defer ginkgo.GinkgoRecover()
-			err := deleteKubeNamespace(kubeClient, ns)
-			assert.Nil(ginkgo.GinkgoT(), err, "deleting namespace %v", f.Namespace)
-		}()
-	}(f.KubeClientSet, f.Namespace)
+	defer f.DestroyEnvironment()
 
 	defer func(kubeClient kubernetes.Interface, ingressclass string) {
-		go func() {
-			defer ginkgo.GinkgoRecover()
-			err := deleteIngressClass(kubeClient, ingressclass)
-			assert.Nil(ginkgo.GinkgoT(), err, "deleting IngressClass")
-		}()
+		defer ginkgo.GinkgoRecover()
+
+		err := f.UninstallChart()
+		assert.Nil(ginkgo.GinkgoT(), err, "uninstalling helm chart")
+
+		err = deleteIngressClass(kubeClient, ingressclass)
+		assert.Nil(ginkgo.GinkgoT(), err, "deleting IngressClass")
 	}(f.KubeClientSet, f.IngressClass)
 
-	if !ginkgo.CurrentGinkgoTestDescription().Failed {
+	if !ginkgo.CurrentSpecReport().Failed() {
 		return
 	}
 
-	cmd := fmt.Sprintf("cat /etc/nginx/nginx.conf")
+	cmd := "cat /etc/nginx/nginx.conf"
 	o, err := f.ExecCommand(f.pod, cmd)
 	if err != nil {
 		Logf("Unexpected error obtaining nginx.conf file: %v", err)
@@ -177,6 +219,11 @@ func IngressNginxDescribe(text string, body func()) bool {
 	return ginkgo.Describe(text, body)
 }
 
+// IngressNginxDescribeSerial wrapper function for ginkgo describe. Adds namespacing.
+func IngressNginxDescribeSerial(text string, body func()) bool {
+	return ginkgo.Describe(text, ginkgo.Serial, body)
+}
+
 // DescribeAnnotation wrapper function for ginkgo describe. Adds namespacing.
 func DescribeAnnotation(text string, body func()) bool {
 	return ginkgo.Describe("[Annotations] "+text, body)
@@ -185,11 +232,6 @@ func DescribeAnnotation(text string, body func()) bool {
 // DescribeSetting wrapper function for ginkgo describe. Adds namespacing.
 func DescribeSetting(text string, body func()) bool {
 	return ginkgo.Describe("[Setting] "+text, body)
-}
-
-// MemoryLeakIt is wrapper function for ginkgo It.  Adds "[MemoryLeak]" tag and makes static analysis easier.
-func MemoryLeakIt(text string, body interface{}, timeout ...float64) bool {
-	return ginkgo.It(text+" [MemoryLeak]", body, timeout...)
 }
 
 // GetNginxIP returns the number of TCP port where NGINX is running
@@ -214,7 +256,7 @@ func (f *Framework) GetURL(scheme RequestScheme) string {
 }
 
 // GetIngressNGINXPod returns the ingress controller running pod
-func (f *Framework) GetIngressNGINXPod() *corev1.Pod {
+func (f *Framework) GetIngressNGINXPod() *v1.Pod {
 	return f.pod
 }
 
@@ -260,7 +302,7 @@ func (f *Framework) matchNginxConditions(name string, matcher func(cfg string) b
 	return func() (bool, error) {
 		var cmd string
 		if name == "" {
-			cmd = fmt.Sprintf("cat /etc/nginx/nginx.conf")
+			cmd = "cat /etc/nginx/nginx.conf"
 		} else {
 			cmd = fmt.Sprintf("cat /etc/nginx/nginx.conf | awk '/## start server %v/,/## end server %v/'", name, name)
 		}
@@ -372,7 +414,7 @@ func (f *Framework) UpdateNginxConfigMapData(key string, value string) {
 }
 
 // WaitForReload calls the passed function and
-// asser it has caused at least 1 reload.
+// asserts it has caused at least 1 reload.
 func (f *Framework) WaitForReload(fn func()) {
 	initialReloadCount := getReloadCount(f.pod, f.Namespace, f.KubeClientSet)
 
@@ -394,13 +436,13 @@ func (f *Framework) WaitForReload(fn func()) {
 	assert.Nil(ginkgo.GinkgoT(), err, "while waiting for ingress controller reload")
 }
 
-func getReloadCount(pod *corev1.Pod, namespace string, client kubernetes.Interface) int {
+func getReloadCount(pod *v1.Pod, namespace string, client kubernetes.Interface) int {
 	events, err := client.CoreV1().Events(namespace).Search(scheme.Scheme, pod)
 	assert.Nil(ginkgo.GinkgoT(), err, "obtaining NGINX Pod")
 
 	reloadCount := 0
 	for _, e := range events.Items {
-		if e.Reason == "RELOAD" && e.Type == corev1.EventTypeNormal {
+		if e.Reason == "RELOAD" && e.Type == v1.EventTypeNormal {
 			reloadCount++
 		}
 	}
@@ -426,42 +468,41 @@ func (f *Framework) DeleteNGINXPod(grace int64) {
 	assert.Nil(ginkgo.GinkgoT(), err, "while waiting for ingress nginx pod to come up again")
 }
 
-// HTTPTestClient returns a new httpexpect client for end-to-end HTTP testing.
-func (f *Framework) HTTPTestClient() *httpexpect.Expect {
-	return f.newTestClient(nil)
+// HTTPDumbTestClient returns a new httpexpect client without BaseURL.
+func (f *Framework) HTTPDumbTestClient() *httpexpect.HTTPRequest {
+	return f.newHTTPTestClient(nil, false)
+}
+
+// HTTPTestClient returns a new HTTPRequest client for end-to-end HTTP testing.
+func (f *Framework) HTTPTestClient() *httpexpect.HTTPRequest {
+	return f.newHTTPTestClient(nil, true)
 }
 
 // HTTPTestClientWithTLSConfig returns a new httpexpect client for end-to-end
 // HTTP testing with a custom TLS configuration.
-func (f *Framework) HTTPTestClientWithTLSConfig(config *tls.Config) *httpexpect.Expect {
-	return f.newTestClient(config)
+func (f *Framework) HTTPTestClientWithTLSConfig(config *tls.Config) *httpexpect.HTTPRequest {
+	return f.newHTTPTestClient(config, true)
 }
 
-func (f *Framework) newTestClient(config *tls.Config) *httpexpect.Expect {
+func (f *Framework) newHTTPTestClient(config *tls.Config, setIngressURL bool) *httpexpect.HTTPRequest {
 	if config == nil {
 		config = &tls.Config{
 			InsecureSkipVerify: true,
 		}
 	}
+	var baseURL string
+	if setIngressURL {
+		baseURL = f.GetURL(HTTP)
+	}
 
-	return httpexpect.WithConfig(httpexpect.Config{
-		BaseURL: f.GetURL(HTTP),
-		Client: &http.Client{
-			Transport: &http.Transport{
-				TLSClientConfig: config,
-			},
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
+	return httpexpect.NewRequest(baseURL, &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: config,
 		},
-		Reporter: httpexpect.NewAssertReporter(
-			httpexpect.NewAssertReporter(ginkgo.GinkgoT()),
-		),
-		Printers: []httpexpect.Printer{
-			// TODO: enable conditionally?
-			// httpexpect.NewDebugPrinter(ginkgo.GinkgoT(), false),
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
 		},
-	})
+	}, httpexpect.NewAssertReporter())
 }
 
 // WaitForNginxListening waits until NGINX starts accepting connections on a port
@@ -486,6 +527,19 @@ func (f *Framework) WaitForNginxListening(port int) {
 	assert.Nil(ginkgo.GinkgoT(), err, "waiting for ingress controller pod listening on port 80")
 }
 
+// WaitForPod waits for a specific Pod to be ready, using a label selector
+func (f *Framework) WaitForPod(selector string, timeout time.Duration, shouldFail bool) {
+	err := waitForPodsReady(f.KubeClientSet, timeout, 1, f.Namespace, metav1.ListOptions{
+		LabelSelector: selector,
+	})
+
+	if shouldFail {
+		assert.NotNil(ginkgo.GinkgoT(), err, "waiting for pods to be ready")
+	} else {
+		assert.Nil(ginkgo.GinkgoT(), err, "waiting for pods to be ready")
+	}
+}
+
 // UpdateDeployment runs the given updateFunc on the deployment and waits for it to be updated
 func UpdateDeployment(kubeClientSet kubernetes.Interface, namespace string, name string, replicas int, updateFunc func(d *appsv1.Deployment) error) error {
 	deployment, err := kubeClientSet.AppsV1().Deployments(namespace).Get(context.TODO(), name, metav1.GetOptions{})
@@ -508,7 +562,7 @@ func UpdateDeployment(kubeClientSet kubernetes.Interface, namespace string, name
 		deployment.Spec.Replicas = NewInt32(int32(replicas))
 		_, err = kubeClientSet.AppsV1().Deployments(namespace).Update(context.TODO(), deployment, metav1.UpdateOptions{})
 		if err != nil {
-			return errors.Wrapf(err, "scaling the number of replicas to %v", replicas)
+			return fmt.Errorf("scaling the number of replicas to %d: %w", replicas, err)
 		}
 
 		err = waitForDeploymentRollout(kubeClientSet, deployment)
@@ -521,7 +575,7 @@ func UpdateDeployment(kubeClientSet kubernetes.Interface, namespace string, name
 		LabelSelector: fields.SelectorFromSet(fields.Set(deployment.Spec.Template.ObjectMeta.Labels)).String(),
 	})
 	if err != nil {
-		return errors.Wrapf(err, "waiting for nginx-ingress-controller replica count to be %v", replicas)
+		return fmt.Errorf("waiting for nginx-ingress-controller replica count to be %d: %w", replicas, err)
 	}
 
 	return nil
@@ -586,6 +640,12 @@ func NewSingleIngressWithTLS(name, path, host string, tlsHosts []string, ns, ser
 // NewSingleIngress creates a simple ingress rule
 func NewSingleIngress(name, path, host, ns, service string, port int, annotations map[string]string) *networking.Ingress {
 	return newSingleIngressWithRules(name, path, host, ns, service, port, annotations, nil)
+}
+
+func NewSingleIngressWithIngressClass(name, path, host, ns, service, ingressClass string, port int, annotations map[string]string) *networking.Ingress {
+	ing := newSingleIngressWithRules(name, path, host, ns, service, port, annotations, nil)
+	ing.Spec.IngressClassName = &ingressClass
+	return ing
 }
 
 // NewSingleIngressWithMultiplePaths creates a simple ingress rule with multiple paths
@@ -756,7 +816,7 @@ func Sleep(duration ...time.Duration) {
 	time.Sleep(sleepFor)
 }
 
-func loadConfig() (*restclient.Config, error) {
+func loadConfig() (*rest.Config, error) {
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		return nil, err

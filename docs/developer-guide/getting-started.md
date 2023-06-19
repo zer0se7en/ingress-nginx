@@ -1,6 +1,14 @@
-# Developing for NGINX Ingress Controller
+ Developing for Ingress-Nginx Controller
 
-This document explains how to get started with developing for NGINX Ingress controller.
+This document explains how to get started with developing for Ingress-Nginx Controller.
+
+For the really new contributors, who want to contribute to the INGRESS-NGINX project, but need help with understanding some basic concepts,
+that are needed to work with the Kubernetes ingress resource, here is a link to the [New Contributors Guide](https://github.com/kubernetes/ingress-nginx/blob/main/NEW_CONTRIBUTOR.md).
+This guide contains tips on how a http/https request travels, from a browser or a curl command,
+to the webserver process running inside a container, in a pod, in a Kubernetes cluster, but enters the cluster via a ingress resource.
+For those who are familiar with those basic networking concepts like routing of a packet with regards to a
+http request, termination of connection, reverseproxy etc. etc., you can skip this and move on to the sections below.
+(or read it anyways just for context and also provide feedbacks if any)
 
 ## Prerequisites
 
@@ -29,7 +37,7 @@ Start a local Kubernetes cluster using [kind](https://kind.sigs.k8s.io/), build 
 ```console
 make dev-env
 ```
-- If you are working on the v1.x.x version of this controler, and you want to create a cluster with kubernetes version 1.22, then please visit the [documentation for kind](https://kind.sigs.k8s.io/docs/user/configuration/#a-note-on-cli-parameters-and-configuration-files), and look for how to set a custom image for the kind node (image: kindest/node...), in the kind config file.
+- If you are working on the v1.x.x version of this controller, and you want to create a cluster with kubernetes version 1.22, then please visit the [documentation for kind](https://kind.sigs.k8s.io/docs/user/configuration/#a-note-on-cli-parameters-and-configuration-files), and look for how to set a custom image for the kind node (image: kindest/node...), in the kind config file.
 
 ### Testing
 

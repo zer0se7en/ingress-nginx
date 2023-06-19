@@ -21,7 +21,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
 
 	"k8s.io/ingress-nginx/test/e2e/framework"
@@ -39,6 +39,11 @@ var _ = framework.DescribeAnnotation("annotation-global-rate-limit", func() {
 		annotations := make(map[string]string)
 		annotations["nginx.ingress.kubernetes.io/global-rate-limit"] = "5"
 		annotations["nginx.ingress.kubernetes.io/global-rate-limit-window"] = "2m"
+
+		// We need to allow { and } characters for this annotation to work
+		f.UpdateNginxConfigMapData("annotation-value-word-blocklist", "load_module, lua_package, _by_lua, location, root")
+		// Sleep a while just to guarantee that the configmap is applied
+		framework.Sleep()
 
 		ing := framework.NewSingleIngress(host, "/", host, f.Namespace, framework.EchoService, 80, annotations)
 		ing = f.EnsureIngress(ing)

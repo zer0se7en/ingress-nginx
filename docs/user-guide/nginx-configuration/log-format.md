@@ -29,7 +29,7 @@ log_format upstreaminfo
 | `$upstream_response_length` | the length of the response obtained from the upstream server |
 | `$upstream_response_time` | time spent on receiving the response from the upstream server as seconds with millisecond resolution |
 | `$upstream_status` | status code of the response obtained from the upstream server |
-| `$req_id` | the randomly generated ID of the request  |
+| `$req_id` | value of the `X-Request-ID` HTTP header. If the header is not set, a randomly generated ID. |
 
 Additional available variables:
 
@@ -43,5 +43,5 @@ Additional available variables:
 
 Sources:
 
-- [Upstream variables](http://nginx.org/en/docs/http/ngx_http_upstream_module.html#variables)
-- [Embedded variables](http://nginx.org/en/docs/http/ngx_http_core_module.html#variables)
+- [Upstream variables](https://nginx.org/en/docs/http/ngx_http_upstream_module.html#variables)
+- [Embedded variables](https://nginx.org/en/docs/http/ngx_http_core_module.html#variables)

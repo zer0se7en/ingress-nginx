@@ -64,19 +64,23 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   annotations:
-    kubernetes.io/ingress.class: "nginx"
     nginx.ingress.kubernetes.io/backend-protocol: "FCGI"
     nginx.ingress.kubernetes.io/fastcgi-index: "index.php"
     nginx.ingress.kubernetes.io/fastcgi-params-configmap: "example-cm"
   name: example-app
 spec:
+  ingressClassName: nginx
   rules:
   - host: app.example.com
     http:
       paths:
-      - backend:
-          serviceName: example-service
-          servicePort: fastcgi
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: example-service
+            port:
+              name: fastcgi
 ```
 
 ## FastCGI Ingress Annotations
@@ -89,13 +93,13 @@ To enable FastCGI, the `nginx.ingress.kubernetes.io/backend-protocol` annotation
 
 ### The `nginx.ingress.kubernetes.io/fastcgi-index` Annotation
 
-To specify an index file, the `fastcgi-index` annotation value can optionally be set.  In the example below, the value is set to `index.php`.  This annotation corresponds to [the _NGINX_ `fastcgi_index` directive](http://nginx.org/en/docs/http/ngx_http_fastcgi_module.html#fastcgi_index).
+To specify an index file, the `fastcgi-index` annotation value can optionally be set.  In the example below, the value is set to `index.php`.  This annotation corresponds to [the _NGINX_ `fastcgi_index` directive](https://nginx.org/en/docs/http/ngx_http_fastcgi_module.html#fastcgi_index).
 
 > `nginx.ingress.kubernetes.io/fastcgi-index: "index.php"`
 
 ### The `nginx.ingress.kubernetes.io/fastcgi-params-configmap` Annotation
 
-To specify [_NGINX_ `fastcgi_param` directives](http://nginx.org/en/docs/http/ngx_http_fastcgi_module.html#fastcgi_param), the `fastcgi-params-configmap` annotation is used, which in turn must lead to a _ConfigMap_ object containing the _NGINX_ `fastcgi_param` directives as key/values.
+To specify [_NGINX_ `fastcgi_param` directives](https://nginx.org/en/docs/http/ngx_http_fastcgi_module.html#fastcgi_param), the `fastcgi-params-configmap` annotation is used, which in turn must lead to a _ConfigMap_ object containing the _NGINX_ `fastcgi_param` directives as key/values.
 
 > `nginx.ingress.kubernetes.io/fastcgi-params-configmap: "example-configmap"`
 
